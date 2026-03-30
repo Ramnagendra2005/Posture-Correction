@@ -76,6 +76,7 @@ function aggregateSessions(sessions = [], now = new Date()) {
 
   const totals = {
     totalTimeTrackedSeconds: 0,
+    totalTimeTracked: 0,
     sessionsCount: sortedSessions.length,
     averageScores: {
       headTilt: 0,
@@ -87,8 +88,8 @@ function aggregateSessions(sessions = [], now = new Date()) {
     totalCorrections: {
       headTiltCorrections: 0,
       shoulderCorrections: 0,
-      forwardLeanCorrections: 0,
-      tooCloseCorrections: 0,
+      backCorrections: 0,
+      proximityWarnings: 0,
       total: 0,
     },
     eyeHealthMetrics: {
@@ -134,11 +135,26 @@ function aggregateSessions(sessions = [], now = new Date()) {
     totals.averageScores.proximity += proximity;
     totals.averageScores.overall += overall;
 
-    totals.totalCorrections.headTiltCorrections += toNumber(metrics.headTiltCount);
-    totals.totalCorrections.shoulderCorrections += toNumber(metrics.shoulderMisalignmentCount);
-    totals.totalCorrections.forwardLeanCorrections += toNumber(metrics.forwardLeanCount);
-    totals.totalCorrections.tooCloseCorrections += toNumber(metrics.tooCloseCount);
-    totals.totalCorrections.total += toNumber(metrics.totalCorrections);
+    const headTiltCorrections = toNumber(metrics.headTiltCount ?? metrics.head_tilt);
+    const shoulderCorrections = toNumber(
+      metrics.shoulderBendingCount ?? metrics.shoulderMisalignmentCount ?? metrics.shoulder_bend
+    );
+    const backCorrections = toNumber(
+      metrics.backBendingCount ?? metrics.forwardLeanCount ?? metrics.back_bend
+    );
+    const proximityWarnings = toNumber(
+      metrics.proximityWarnings ?? metrics.tooCloseCount ?? metrics.too_close
+    );
+    const correctionTotal = toNumber(
+      metrics.totalCorrections,
+      headTiltCorrections + shoulderCorrections + backCorrections + proximityWarnings
+    );
+
+    totals.totalCorrections.headTiltCorrections += headTiltCorrections;
+    totals.totalCorrections.shoulderCorrections += shoulderCorrections;
+    totals.totalCorrections.backCorrections += backCorrections;
+    totals.totalCorrections.proximityWarnings += proximityWarnings;
+    totals.totalCorrections.total += correctionTotal;
 
     totals.eyeHealthMetrics.totalBlinks += toNumber(eyeHealth.blinkCount);
     totals.eyeHealthMetrics.lowBlinkPeriods += toNumber(eyeHealth.lowBlinkWarnings);
@@ -196,6 +212,12 @@ function aggregateSessions(sessions = [], now = new Date()) {
     totals.averageScores.overall / sortedSessions.length
   );
 
+  // DailySummary.totalTimeTracked is stored in minutes.
+  totals.totalTimeTracked = Math.min(
+    1440,
+    Math.round(totals.totalTimeTrackedSeconds / 60)
+  );
+
   totals.eyeHealthMetrics.averageBlinkRate =
     sortedSessions.length > 0 ? blinkRateTotal / sortedSessions.length : 0;
 
@@ -220,16 +242,28 @@ async function rebuildDailySummaryFromSessions(userId, dateInput) {
 
   const aggregate = aggregateSessions(sessions);
 
+  // Compute cumulativeDuration: sum of all prior days' totalTimeTracked (in seconds) + today
+  const priorSummaries = await DailySummary.find({
+    userId,
+    date: { $lt: start },
+  }).select('totalTimeTracked').lean();
+  const priorSeconds = priorSummaries.reduce(
+    (sum, s) => sum + (s.totalTimeTracked || 0) * 60, 0
+  );
+  const todaySeconds = (aggregate.totalTimeTrackedSeconds || 0);
+  const cumulativeDuration = priorSeconds + todaySeconds;
+
   const summary = await DailySummary.findOneAndUpdate(
     { userId, date: start },
     {
       $set: {
-        totalTimeTrackedSeconds: aggregate.totalTimeTrackedSeconds,
+        totalTimeTracked: aggregate.totalTimeTracked,
         sessionsCount: aggregate.sessionsCount,
         averageScores: aggregate.averageScores,
         totalCorrections: aggregate.totalCorrections,
         eyeHealthMetrics: aggregate.eyeHealthMetrics,
         qualityMetrics: aggregate.qualityMetrics,
+        cumulativeDuration,
       },
       $setOnInsert: {
         userId,

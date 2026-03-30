@@ -132,6 +132,7 @@ const postureSessionSchema = new mongoose.Schema(
       headTiltCount: { type: Number, default: 0 },
       shoulderBendingCount: { type: Number, default: 0 },
       backBendingCount: { type: Number, default: 0 },
+      proximityWarnings: { type: Number, default: 0 },
       totalCorrections: { type: Number, default: 0 },
     },
     scores: {
@@ -167,6 +168,7 @@ const postureSessionSchema = new mongoose.Schema(
       },
     ],
     deviceInfo: {
+      sessionId: { type: String },
       cameraResolution: { type: String },
       userAgent: { type: String },
       platform: { type: String },
@@ -296,6 +298,7 @@ const dailySummarySchema = new mongoose.Schema(
       headTiltCorrections: { type: Number, default: 0 },
       shoulderCorrections: { type: Number, default: 0 },
       backCorrections: { type: Number, default: 0 },
+      proximityWarnings: { type: Number, default: 0 },
       total: { type: Number, default: 0 },
     },
     eyeHealthMetrics: {
@@ -319,20 +322,7 @@ const dailySummarySchema = new mongoose.Schema(
   }
 );
 
-// Compound index for efficient date-based queries
-dailySummarySchema.index({ userId: 1, date: 1 }, { unique: true });
-posturePatternSchema.index({ userId: 1, timestamp: 1 });
-postureSessionSchema.index({ userId: 1, startTime: 1 });
-
-// Export models
-module.exports = {
-  User: mongoose.model("User", userSchema),
-  PostureSession: mongoose.model("PostureSession", postureSessionSchema),
-  PosturePattern: mongoose.model("PosturePattern", posturePatternSchema),
-  DailySummary: mongoose.model("DailySummary", dailySummarySchema),
-};
-
-// --- Appended: Tracked Time Schema and Export ---
+// Tracked Time Schema
 const trackedTimeSchema = new mongoose.Schema(
   {
     userId: {
@@ -347,7 +337,66 @@ const trackedTimeSchema = new mongoose.Schema(
   },
   { timestamps: true }
 );
-trackedTimeSchema.index({ userId: 1, date: 1 }, { unique: true });
 
-// Safely attach to existing exports without altering original object structure
-module.exports.TrackedTime = mongoose.model("TrackedTime", trackedTimeSchema);
+// Exercise Recommendation Schema
+const exerciseRecommendationSchema = new mongoose.Schema(
+  {
+    userId: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: "User",
+      required: true,
+      index: true,
+    },
+    date: {
+      type: Date,
+      required: true,
+      default: Date.now,
+    },
+    flawType: {
+      type: String,
+      required: true,
+      enum: [
+        "head_tilt",
+        "shoulder_misalignment",
+        "forward_lean",
+        "back_bending",
+        "too_close",
+        "general",
+      ],
+      default: "general",
+    },
+    exercises: [
+      {
+        name: { type: String, required: true },
+        durationMinutes: { type: Number, default: 0 },
+      },
+    ],
+    severity: {
+      type: String,
+      enum: ["mild", "moderate", "severe"],
+      default: "mild",
+    },
+    completed: {
+      type: Boolean,
+      default: false,
+    },
+  },
+  { timestamps: true }
+);
+
+// Compound indexes for efficient date-based queries
+dailySummarySchema.index({ userId: 1, date: 1 }, { unique: true });
+posturePatternSchema.index({ userId: 1, timestamp: 1 });
+postureSessionSchema.index({ userId: 1, startTime: 1 });
+trackedTimeSchema.index({ userId: 1, date: 1 }, { unique: true });
+exerciseRecommendationSchema.index({ userId: 1, date: -1 });
+
+// Export models
+module.exports = {
+  User: mongoose.model("User", userSchema),
+  PostureSession: mongoose.model("PostureSession", postureSessionSchema),
+  PosturePattern: mongoose.model("PosturePattern", posturePatternSchema),
+  DailySummary: mongoose.model("DailySummary", dailySummarySchema),
+  TrackedTime: mongoose.model("TrackedTime", trackedTimeSchema),
+  ExerciseRecommendation: mongoose.model("ExerciseRecommendation", exerciseRecommendationSchema),
+};

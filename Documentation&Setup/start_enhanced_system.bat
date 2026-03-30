@@ -22,8 +22,7 @@ echo Backend API starting on http://localhost:3000
 echo.
 
 echo [3/4] Starting Python Posture Detection Service...
-cd python
-start "Python Service" cmd /k "python enhanced_posture_detector.py"
+start "Python Service" cmd /k "python backend.py"
 timeout /t 3 /nobreak >nul
 echo Python service starting on http://localhost:5001
 echo.

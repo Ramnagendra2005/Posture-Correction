@@ -49,6 +49,15 @@ router.post(
       const userId = req.userId;
       const { cameraResolution, userAgent, platform } = req.body;
 
+      if (!userId) {
+        return res.status(401).json({
+          success: false,
+          message: "Authentication required",
+        });
+      }
+
+      const userPreferences = req.user?.preferences || null;
+
       // Check if user already has an active session
       const activeSession = PostureService.getActiveSession(userId);
       if (activeSession) {
@@ -78,7 +87,7 @@ router.post(
           sessionId: session._id,
           startTime: session.startTime,
           status: session.status,
-          preferences: req.user.preferences,
+          preferences: userPreferences,
         },
       });
     } catch (error) {

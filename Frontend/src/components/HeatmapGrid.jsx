@@ -3,7 +3,7 @@ import useAuth from '../hooks/useAuth';
 
 const API_BASE = import.meta.env.VITE_API_BASE_URL || 'http://localhost:3001';
 
-const HeatmapGrid = ({ userId, year = new Date().getFullYear() }) => {
+const HeatmapGrid = ({ year = new Date().getFullYear() }) => {
   const [data, setData] = useState({});
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);
@@ -14,11 +14,8 @@ const HeatmapGrid = ({ userId, year = new Date().getFullYear() }) => {
   const fetchHeatmapData = useCallback(async () => {
     try {
       setLoading(true);
-      
-      let endpoint = `/api/posture/heatmap/${year}`;
-      if (userId) {
-        endpoint += `/${userId}`;
-      }
+
+      const endpoint = `/api/posture/heatmap/${year}`;
 
       const response = await fetch(`${API_BASE}${endpoint}`, {
         headers: token ? {
@@ -34,19 +31,46 @@ const HeatmapGrid = ({ userId, year = new Date().getFullYear() }) => {
       }
 
       const result = await response.json();
+
+      const rows =
+        result.heatmap_data ||
+        result.heatmapData ||
+        result?.data?.heatmap_data ||
+        result?.data?.heatmapData ||
+        [];
       
       // Transform data into date-keyed object
       const heatmapData = {};
-      result.heatmap_data?.forEach(item => {
+      rows.forEach(item => {
+        const scores = item.average_scores || item.averageScores || {};
+        const corrections = item.total_corrections || item.totalCorrections || {};
+        const rawScore =
+          scores.overall ?? scores.overallScore ?? item.overall_score ?? item.overallScore ?? 0;
+        const rawTimeTracked = item.total_time_tracked ?? item.totalTimeTracked ?? 0;
+        const minutesTracked = rawTimeTracked > 1440 ? rawTimeTracked / 60 : rawTimeTracked;
+
+        const headTiltCorrections =
+          corrections.head_tilt ?? corrections.headTiltCorrections ?? corrections.headTiltCount ?? 0;
+        const shoulderCorrections =
+          corrections.shoulder_bend ??
+          corrections.shoulderCorrections ??
+          corrections.shoulderBendingCount ??
+          0;
+        const backCorrections =
+          corrections.back_bend ?? corrections.backCorrections ?? corrections.backBendingCount ?? 0;
+        const proximityCorrections =
+          corrections.too_close ?? corrections.proximityWarnings ?? 0;
+
         const date = new Date(item.date).toISOString().split('T')[0];
         heatmapData[date] = {
-          score: Math.round(item.average_scores?.overall || 0),
-          time_tracked: Math.round((item.total_time_tracked || 0) / 60), // Convert to minutes
-          corrections: (item.total_corrections?.head_tilt || 0) + 
-                      (item.total_corrections?.shoulder_bend || 0) + 
-                      (item.total_corrections?.back_bend || 0) + 
-                      (item.total_corrections?.too_close || 0),
-          sessions: item.session_count || 0
+          score: Math.round(Number(rawScore) || 0),
+          time_tracked: Math.round(Number(minutesTracked) || 0),
+          corrections:
+            (Number(headTiltCorrections) || 0) +
+            (Number(shoulderCorrections) || 0) +
+            (Number(backCorrections) || 0) +
+            (Number(proximityCorrections) || 0),
+          sessions: Number(item.session_count ?? item.sessionsCount ?? 0) || 0
         };
       });
 
@@ -59,7 +83,7 @@ const HeatmapGrid = ({ userId, year = new Date().getFullYear() }) => {
     } finally {
       setLoading(false);
     }
-  }, [userId, year, token]);
+  }, [year, token]);
 
   useEffect(() => {
     fetchHeatmapData();

@@ -4,7 +4,7 @@ import useAuth from '../hooks/useAuth';
 
 const API_BASE = import.meta.env.VITE_API_BASE_URL || 'http://localhost:3001';
 
-const ProgressTrendChart = ({ userId, timeRange = 'weekly' }) => {
+const ProgressTrendChart = ({ timeRange = 'weekly' }) => {
   const [data, setData] = useState(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);
@@ -23,10 +23,10 @@ const ProgressTrendChart = ({ userId, timeRange = 'weekly' }) => {
     try {
       setLoading(true);
       
-      let endpoint = `/api/posture/trend/${timeRange}`;
-      if (userId) {
-        endpoint += `/${userId}`;
-      }
+      const normalizedTimeRange = ['daily', 'weekly', 'monthly'].includes(timeRange)
+        ? timeRange
+        : 'weekly';
+      const endpoint = `/api/posture/trend/${normalizedTimeRange}`;
 
   const response = await fetch(`${API_BASE}${endpoint}`, {
         headers: token ? {
@@ -42,33 +42,44 @@ const ProgressTrendChart = ({ userId, timeRange = 'weekly' }) => {
       }
 
       const result = await response.json();
+
+      const trendRows = result.trend_data || result.trendData || [];
       
       // Transform data for line chart
-      const transformedData = result.trend_data?.map(item => ({
+      const transformedData = trendRows.map(item => {
+        const scores = item.average_scores || item.averageScores || {};
+        const corrections = item.total_corrections || item.totalCorrections || {};
+        const headTiltScore = scores.head_tilt ?? scores.headTilt ?? scores.headTiltScore ?? 0;
+        const shoulderScore = scores.shoulder_bend ?? scores.shoulderAlignment ?? scores.shoulderAlignmentScore ?? 0;
+        const backScore = scores.back_bend ?? scores.spinalPosture ?? scores.spinalPostureScore ?? 0;
+        const overallScore = scores.overall ?? scores.overallScore ?? 0;
+
+        const headTiltCorrections = corrections.head_tilt ?? corrections.headTiltCount ?? corrections.headTiltCorrections ?? 0;
+        const shoulderCorrections = corrections.shoulder_bend ?? corrections.shoulderBendingCount ?? corrections.shoulderCorrections ?? 0;
+        const backCorrections = corrections.back_bend ?? corrections.backBendingCount ?? corrections.backCorrections ?? 0;
+        const proximityCorrections = corrections.too_close ?? corrections.proximityWarnings ?? 0;
+
+        const totalTimeTracked = item.total_time_tracked ?? item.totalTimeTracked ?? 0;
+        const totalCorrections =
+          headTiltCorrections + shoulderCorrections + backCorrections + proximityCorrections;
+
+        return {
         date: new Date(item.date).toLocaleDateString('en-US', {
           month: 'short',
           day: 'numeric',
           ...(timeRange === 'monthly' && { year: '2-digit' })
         }),
-        overall_score: Math.round(item.average_scores?.overall || 0),
+        overall_score: Math.round(overallScore),
         posture_score: Math.round(
-          ((item.average_scores?.head_tilt || 0) + 
-           (item.average_scores?.shoulder_bend || 0) + 
-           (item.average_scores?.back_bend || 0)) / 3
+          (headTiltScore + shoulderScore + backScore) / 3
         ),
-        correction_count: (item.total_corrections?.head_tilt || 0) + 
-                         (item.total_corrections?.shoulder_bend || 0) + 
-                         (item.total_corrections?.back_bend || 0) + 
-                         (item.total_corrections?.too_close || 0),
-        session_duration: Math.round((item.total_time_tracked || 0) / 60),
+        correction_count: totalCorrections,
+        session_duration: Math.round(totalTimeTracked / 60),
         good_posture_time: Math.round(
-          (item.total_time_tracked || 0) / 60 - 
-          ((item.total_corrections?.head_tilt || 0) + 
-           (item.total_corrections?.shoulder_bend || 0) + 
-           (item.total_corrections?.back_bend || 0) + 
-           (item.total_corrections?.too_close || 0)) * 0.1
+          totalTimeTracked / 60 - totalCorrections * 0.1
         )
-      })) || [];
+      };
+      });
 
       setData(transformedData);
       setError(null);
@@ -79,7 +90,7 @@ const ProgressTrendChart = ({ userId, timeRange = 'weekly' }) => {
     } finally {
       setLoading(false);
     }
-  }, [userId, timeRange, token]);
+  }, [timeRange, token]);
 
   useEffect(() => {
     fetchTrendData();

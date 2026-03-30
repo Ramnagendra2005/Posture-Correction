@@ -176,6 +176,8 @@ What would you like to know about maintaining healthy posture?`;
 router.post("/", authenticateToken, async (req, res) => {
   try {
     const { message } = req.body;
+    const userId = req.userId?.toString?.() || req.user?._id?.toString?.() || "unknown";
+    const username = req.user?.username || "unknown";
 
     if (!message || typeof message !== "string") {
       return res.status(400).json({
@@ -186,7 +188,7 @@ router.post("/", authenticateToken, async (req, res) => {
 
     // Log the chat interaction
     logger.info(
-      `Chat message from user ${req.user.username}: ${message.substring(
+      `Chat message from user ${username} (${userId}): ${message.substring(
         0,
         50
       )}...`
@@ -205,8 +207,8 @@ router.post("/", authenticateToken, async (req, res) => {
       try {
         // Use Gemini AI for intelligent responses
         response = await generateAIResponse(message.trim(), {
-          userId: req.user.id,
-          username: req.user.username,
+          userId,
+          username,
         });
       } catch (aiError) {
         logger.error("AI response failed, using fallback:", aiError);

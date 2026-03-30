@@ -1,11 +1,11 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useCallback, useRef } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
 import { 
   Activity, TrendingUp, Clock, Target, Zap, Eye, 
   RefreshCw 
 } from 'lucide-react';
 import useAuth from '../hooks/useAuth';
-const API_BASE = import.meta.env.VITE_API_BASE_URL || 'http://localhost:5000';
+const API_BASE = import.meta.env.VITE_API_BASE_URL || 'http://localhost:3001';
 
 const Dashboard = () => {
   const { token } = useAuth();
@@ -18,31 +18,96 @@ const Dashboard = () => {
   });
   const [isLive, setIsLive] = useState(false);
   const [lastUpdate, setLastUpdate] = useState(new Date());
+  const [activities, setActivities] = useState([]);
+  const previousStatsRef = useRef(null);
+  const activityIdRef = useRef(1);
+
+  const addActivity = useCallback((action, score, type = 'info') => {
+    const id = activityIdRef.current;
+    activityIdRef.current += 1;
+
+    setActivities((prev) => [
+      { id, action, score, type, timestamp: new Date().toISOString() },
+      ...prev,
+    ].slice(0, 12));
+  }, []);
+
+  const getRelativeTime = (timestamp) => {
+    const seconds = Math.max(0, Math.floor((Date.now() - new Date(timestamp).getTime()) / 1000));
+    if (seconds < 60) return `${seconds}s ago`;
+    const minutes = Math.floor(seconds / 60);
+    if (minutes < 60) return `${minutes} min ago`;
+    const hours = Math.floor(minutes / 60);
+    return `${hours}h ago`;
+  };
+
+  const fetchLiveStats = useCallback(async () => {
+    if (!token) return;
+
+    try {
+      const response = await fetch(`${API_BASE}/api/posture/live-dashboard`, {
+        headers: {
+          'Authorization': `Bearer ${token}`,
+          'Content-Type': 'application/json',
+        },
+      });
+
+      if (!response.ok) {
+        throw new Error(`HTTP error! status: ${response.status}`);
+      }
+
+      const data = await response.json();
+      const prev = previousStatsRef.current;
+
+      if (!prev) {
+        addActivity('Live dashboard connected', 'Monitoring active', 'info');
+      } else {
+        const sessionDelta = (data.sessionsToday || 0) - (prev.sessionsToday || 0);
+        const correctionDelta = (data.totalCorrections || 0) - (prev.totalCorrections || 0);
+        const scoreDelta = (data.currentScore || 0) - (prev.currentScore || 0);
+        const timeDelta = (data.timeToday || 0) - (prev.timeToday || 0);
+
+        if (sessionDelta > 0) {
+          addActivity(
+            sessionDelta === 1 ? 'New session tracked' : `${sessionDelta} new sessions tracked`,
+            `+${sessionDelta} session${sessionDelta > 1 ? 's' : ''}`,
+            'info'
+          );
+        }
+
+        if (correctionDelta > 0) {
+          addActivity(
+            correctionDelta === 1 ? 'Posture correction detected' : 'Posture corrections detected',
+            `+${correctionDelta} correction${correctionDelta > 1 ? 's' : ''}`,
+            'warning'
+          );
+        }
+
+        if (scoreDelta > 0) {
+          addActivity('Posture score improved', `+${scoreDelta}%`, 'success');
+        } else if (scoreDelta < 0) {
+          addActivity('Posture score dropped', `${scoreDelta}%`, 'warning');
+        }
+
+        if (timeDelta > 0) {
+          addActivity('Active monitoring time increased', `+${timeDelta} min`, 'success');
+        }
+      }
+
+      previousStatsRef.current = data;
+      setLiveStats(data);
+      setIsLive(true);
+      setLastUpdate(new Date());
+    } catch (error) {
+      console.error('Failed to fetch live stats:', error);
+      setIsLive(false);
+      addActivity('Live sync failed', 'Will retry automatically', 'warning');
+    }
+  }, [token, addActivity]);
 
   // Real-time data fetching
   useEffect(() => {
     if (!token) return;
-
-    const fetchLiveStats = async () => {
-      try {
-  const response = await fetch(`${API_BASE}/api/posture/live-dashboard`, {
-          headers: {
-            'Authorization': `Bearer ${token}`,
-            'Content-Type': 'application/json',
-          },
-        });
-
-        if (response.ok) {
-          const data = await response.json();
-          setLiveStats(data);
-          setIsLive(true);
-          setLastUpdate(new Date());
-        }
-      } catch (error) {
-        console.error('Failed to fetch live stats:', error);
-        setIsLive(false);
-      }
-    };
 
     // Fetch immediately
     fetchLiveStats();
@@ -50,7 +115,7 @@ const Dashboard = () => {
     // Set up real-time updates every 3 seconds
     const interval = setInterval(fetchLiveStats, 3000);
     return () => clearInterval(interval);
-  }, [token]);
+  }, [token, fetchLiveStats]);
 
   const StatCard = ({ icon: Icon, title, value, change, color, isLive }) => (
     <motion.div
@@ -192,6 +257,7 @@ const Dashboard = () => {
             <motion.button
               whileHover={{ scale: 1.05 }}
               whileTap={{ scale: 0.95 }}
+              onClick={fetchLiveStats}
               className="flex items-center px-4 py-2 bg-blue-500 text-white rounded-lg font-medium hover:bg-blue-600 transition-colors"
             >
               <RefreshCw className="h-4 w-4 mr-2" />
@@ -201,14 +267,9 @@ const Dashboard = () => {
 
           <div className="space-y-4">
             <AnimatePresence>
-              {[
-                { time: "2 min ago", action: "Posture correction detected", score: "+2 points", type: "success" },
-                { time: "5 min ago", action: "Session started", score: "Active monitoring", type: "info" },
-                { time: "12 min ago", action: "Break reminder sent", score: "Health tip", type: "warning" },
-                { time: "18 min ago", action: "Good posture maintained", score: "+5 points", type: "success" }
-              ].map((activity, index) => (
+              {activities.map((activity, index) => (
                 <motion.div
-                  key={index}
+                  key={activity.id}
                   initial={{ opacity: 0, x: -20 }}
                   animate={{ opacity: 1, x: 0 }}
                   exit={{ opacity: 0, x: 20 }}
@@ -222,7 +283,7 @@ const Dashboard = () => {
                     }`}></div>
                     <div>
                       <p className="font-medium text-gray-800">{activity.action}</p>
-                      <p className="text-sm text-gray-500">{activity.time}</p>
+                      <p className="text-sm text-gray-500">{getRelativeTime(activity.timestamp)}</p>
                     </div>
                   </div>
                   <span className={`px-3 py-1 rounded-full text-xs font-medium ${
@@ -234,6 +295,11 @@ const Dashboard = () => {
                 </motion.div>
               ))}
             </AnimatePresence>
+            {activities.length === 0 && (
+              <div className="text-sm text-gray-500 text-center py-4">
+                Waiting for live activity updates...
+              </div>
+            )}
           </div>
         </motion.div>
       </div>

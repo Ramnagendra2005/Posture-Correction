@@ -22,6 +22,7 @@ const sessionRoutes = require("./routes/session");
 const postureRoutes = require("./routes/posture");
 const reportRoutes = require("./routes/reports");
 const chatRoutes = require("./routes/chat");
+const exerciseRoutes = require("./routes/exercises");
 
 // Import middleware
 const { authenticateToken } = require("./middleware/auth");
@@ -81,7 +82,7 @@ const reportsLimiter = rateLimit({
   standardHeaders: true,
   legacyHeaders: false,
   keyGenerator: (req) =>
-    req.user?.userId ? `u:${req.user.userId}` : `ip:${req.ip}`,
+    req.userId || req.user?._id ? `u:${req.userId || req.user?._id}` : `ip:${req.ip}`,
   message: {
     error: "Too many report requests. Please slow down.",
     retryAfter: "60s",
@@ -95,7 +96,7 @@ const trendsLimiter = rateLimit({
   standardHeaders: true,
   legacyHeaders: false,
   keyGenerator: (req) =>
-    req.user?.userId ? `u:${req.user.userId}` : `ip:${req.ip}`,
+    req.userId || req.user?._id ? `u:${req.userId || req.user?._id}` : `ip:${req.ip}`,
   message: {
     error: "Too many trend requests. Please wait a moment.",
     retryAfter: "60s",
@@ -108,35 +109,16 @@ app.use(
     origin: process.env.FRONTEND_URL || "http://localhost:5173",
     credentials: true,
     methods: ["GET", "POST", "PUT", "DELETE", "PATCH", "OPTIONS"],
-    allowedHeaders: ["Content-Type", "Authorization"],
+    allowedHeaders: [
+      "Content-Type",
+      "Authorization",
+      "Content-Length",
+      "X-Requested-With",
+    ],
     preflightContinue: false,
     optionsSuccessStatus: 200,
   })
 );
-
-// Manual CORS handler for preflight requests
-app.use((req, res, next) => {
-  res.header(
-    "Access-Control-Allow-Origin",
-    process.env.FRONTEND_URL || "http://localhost:5173"
-  );
-  res.header(
-    "Access-Control-Allow-Methods",
-    "GET,PUT,POST,DELETE,PATCH,OPTIONS"
-  );
-  res.header(
-    "Access-Control-Allow-Headers",
-    "Content-Type, Authorization, Content-Length, X-Requested-With"
-  );
-  res.header("Access-Control-Allow-Credentials", "true");
-
-  // Handle preflight OPTIONS request
-  if (req.method === "OPTIONS") {
-    res.sendStatus(200);
-  } else {
-    next();
-  }
-});
 
 // Body parsing middleware
 app.use(express.json({ limit: "10mb" }));
@@ -193,6 +175,7 @@ app.use("/api/posture", postureRoutes); // individual routes handle auth
 // Reports analytics (authenticated, heavier data)
 app.use("/api/reports", authenticateToken, reportsLimiter, reportRoutes);
 app.use("/api/chat", chatRoutes);
+app.use("/api/exercises", authenticateToken, exerciseRoutes);
 
 // Initialize posture service with Socket.IO
 PostureService.initialize(io);
@@ -236,38 +219,11 @@ io.on("connection", (socket) => {
   });
 });
 
-// Manual endpoint to send today's report email to the authenticated user
-app.post(
-  "/api/reports/send-daily-email",
-  authenticateToken,
-  async (req, res) => {
-    try {
-      const { to, subject, html } = await buildDailyEmail(
-        req.userId,
-        new Date()
-      );
-
-      const info = await sendMail({ to, subject, html });
-      if (info?.skipped) {
-        return res.status(202).json({
-          success: false,
-          message: "Email skipped (SMTP not configured)",
-        });
-      }
-      res.json({ success: true, messageId: info.messageId });
-    } catch (err) {
-      logger.error("Failed to send daily email:", err);
-      res.status(500).json({ success: false, message: err.message });
-    }
-  }
-);
-
-// 404 handler
-app.use("*", (req, res) => {
-  res.status(404).json({
-    success: false,
-    message: "Route not found",
-  });
+// 404 handler: forward to the global error handler for consistent formatting/logging.
+app.use("*", (req, res, next) => {
+  const error = new Error("Route not found");
+  error.statusCode = 404;
+  next(error);
 });
 
 // Global error handler

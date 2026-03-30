@@ -4,13 +4,42 @@
  */
 
 const express = require("express");
+const mongoose = require("mongoose");
 const { body, validationResult, query } = require("express-validator");
-const { PostureSession, DailySummary, User } = require("../models");
+const { PostureSession, DailySummary, User, TrackedTime } = require("../models");
 const PostureService = require("../services/postureService");
 const logger = require("../utils/logger");
 const { authenticateToken } = require("../middleware/auth");
 
 const router = express.Router();
+
+// Accept legacy client identifiers (ObjectId or username) while enforcing
+// that all reads/writes stay scoped to the authenticated user.
+const isCurrentUserIdentifier = (req, value) => {
+  if (value === undefined || value === null || value === "") return true;
+  const candidate = String(value);
+  const authenticatedId = req.userId?.toString?.();
+  const authenticatedUsername = req.user?.username;
+  return candidate === authenticatedId || candidate === authenticatedUsername;
+};
+
+const normalizeDurationMinutes = (value) => {
+  const n = Number(value);
+  if (!Number.isFinite(n) || n <= 0) return 0;
+  // Handle legacy records accidentally written in seconds.
+  if (n > 1000) return n / 60;
+  return n;
+};
+
+const formatSecondsAsHms = (seconds) => {
+  const total = Math.max(0, Math.floor(Number(seconds) || 0));
+  const h = Math.floor(total / 3600);
+  const m = Math.floor((total % 3600) / 60);
+  const s = total % 60;
+  return `${h}:${m.toString().padStart(2, "0")}:${s
+    .toString()
+    .padStart(2, "0")}`;
+};
 
 /**
  * @route   POST /api/posture/track
@@ -65,6 +94,13 @@ router.post(
         total_frames = 0,
       } = req.body;
 
+      if (!isCurrentUserIdentifier(req, user_id)) {
+        return res.status(403).json({
+          success: false,
+          message: "Forbidden: user_id does not match authenticated user",
+        });
+      }
+
       // Normalize incoming time_tracked to minutes
       // If looks like seconds (>=1000 and <=86400), convert to minutes. Clamp daily to 1440 minutes.
       const normalizeMinutes = (val) => {
@@ -109,6 +145,9 @@ router.post(
         userId: user._id,
         "deviceInfo.sessionId": session_id,
       });
+      const previousSessionDurationMinutes = session
+        ? Math.max(0, Number(session.duration) || 0)
+        : 0;
 
       if (!session) {
         // Create new session
@@ -146,6 +185,13 @@ router.post(
 
       await session.save();
 
+      // Accumulate only the incremental portion for this session to avoid double-counting
+      // when the same session is reported multiple times with increasing duration.
+      const trackedMinutesIncrement = Math.max(
+        0,
+        timeTrackedMinutes - previousSessionDurationMinutes
+      );
+
       // Update or create daily summary
       const today = new Date(date);
       today.setHours(0, 0, 0, 0);
@@ -159,7 +205,7 @@ router.post(
         dailySummary = new DailySummary({
           userId: user._id,
           date: today,
-          totalTimeTracked: timeTrackedMinutes,
+          totalTimeTracked: Math.min(trackedMinutesIncrement, 1440),
           sessionsCount: 1,
           averageScores: {
             headTilt: session.scores.headTiltScore,
@@ -178,9 +224,9 @@ router.post(
       } else {
         // Update existing summary
         const currentSessions = dailySummary.sessionsCount;
-        // Keep max minutes tracked today; hard-cap at 24h
+        // Accumulate tracked minutes today; hard-cap at 24h.
         dailySummary.totalTimeTracked = Math.min(
-          Math.max(dailySummary.totalTimeTracked, timeTrackedMinutes),
+          (dailySummary.totalTimeTracked || 0) + trackedMinutesIncrement,
           1440
         );
 
@@ -220,6 +266,16 @@ router.post(
         dailySummary.sessionsCount = currentSessions + 1;
       }
 
+      // Compute cumulativeDuration: sum of all prior days' totalTimeTracked (in seconds) + today
+      const priorSummaries = await DailySummary.find({
+        userId: user._id,
+        date: { $lt: today },
+      }).select('totalTimeTracked').lean();
+      const priorSeconds = priorSummaries.reduce(
+        (sum, s) => sum + (s.totalTimeTracked || 0) * 60, 0
+      );
+      dailySummary.cumulativeDuration = priorSeconds + (dailySummary.totalTimeTracked || 0) * 60;
+
       await dailySummary.save();
 
       logger.info(
@@ -255,9 +311,9 @@ router.get("/report/daily", authenticateToken, async (req, res, next) => {
     const date = req.query.date || new Date().toISOString().split("T")[0];
 
     if (!userId) {
-      return res.status(400).json({
+      return res.status(401).json({
         success: false,
-        message: "User ID is required",
+        message: "Authentication required",
       });
     }
 
@@ -274,7 +330,6 @@ router.get("/report/daily", authenticateToken, async (req, res, next) => {
 
     // Get daily summary using raw MongoDB query for better reliability
     const targetDate = new Date(date + "T00:00:00.000Z");
-    const mongoose = require("mongoose");
 
     // Use raw MongoDB collection access to bypass Mongoose issues
     const dailySummary = await mongoose.connection.db
@@ -579,22 +634,42 @@ router.get("/heatmap/:year", authenticateToken, async (req, res, next) => {
 
     // Create heatmap data array with proper structure
     const heatmap_data = heatmapSummaries.map((summary) => ({
+      // Support both canonical camelCase fields and legacy snake_case fields in stored docs.
       date: summary.date.toISOString().split("T")[0],
-      total_time_tracked: summary.totalTimeTracked || 0,
-      session_count: summary.sessionsCount || 0,
+      total_time_tracked: summary.totalTimeTracked || summary.total_time_tracked || 0,
+      session_count: summary.sessionsCount || summary.session_count || 0,
       average_scores: {
-        overall: summary.averageScores?.overall || 0,
-        head_tilt: summary.averageScores?.headTilt || 0,
-        shoulder_bend: summary.averageScores?.shoulderAlignment || 0,
-        back_bend: summary.averageScores?.spinalPosture || 0,
-        too_close: 0, // Not implemented yet
+        overall:
+          summary.averageScores?.overall || summary.average_scores?.overall || 0,
+        head_tilt:
+          summary.averageScores?.headTilt || summary.average_scores?.head_tilt || 0,
+        shoulder_bend:
+          summary.averageScores?.shoulderAlignment ||
+          summary.average_scores?.shoulder_bend ||
+          0,
+        back_bend:
+          summary.averageScores?.spinalPosture || summary.average_scores?.back_bend || 0,
+        too_close:
+          summary.averageScores?.proximityScore || summary.average_scores?.too_close || 0,
       },
       total_corrections: {
-        head_tilt: summary.totalCorrections?.headTiltCorrections || 0,
-        shoulder_bend: summary.totalCorrections?.shoulderCorrections || 0,
-        back_bend: summary.totalCorrections?.backCorrections || 0,
-        too_close: summary.totalCorrections?.proximityWarnings || 0,
-        total: summary.totalCorrections?.total || 0,
+        head_tilt:
+          summary.totalCorrections?.headTiltCorrections ||
+          summary.total_corrections?.head_tilt ||
+          0,
+        shoulder_bend:
+          summary.totalCorrections?.shoulderCorrections ||
+          summary.total_corrections?.shoulder_bend ||
+          0,
+        back_bend:
+          summary.totalCorrections?.backCorrections ||
+          summary.total_corrections?.back_bend ||
+          0,
+        too_close:
+          summary.totalCorrections?.proximityWarnings ||
+          summary.total_corrections?.too_close ||
+          0,
+        total: summary.totalCorrections?.total || summary.total_corrections?.total || 0,
       },
     }));
 
@@ -684,19 +759,67 @@ router.get("/today-overview", authenticateToken, async (req, res, next) => {
       startTime: { $gte: today, $lt: tomorrow },
     }).lean();
 
+    const dailySummary = await DailySummary.findOne({
+      userId,
+      date: today,
+    }).lean();
+
+    const tracked = await TrackedTime.findOne({ userId, date: today }).lean();
+
     // Get active session
     const activeSession = PostureService.getActiveSession(userId);
 
+    // Fallback active session from DB when runtime cache is empty.
+    const activeDbSession = await PostureSession.findOne({
+      userId,
+      status: "active",
+      startTime: { $gte: today, $lt: tomorrow },
+    })
+      .sort({ startTime: -1 })
+      .lean();
+
+    const activeSessionStart =
+      activeSession?.startTime || activeDbSession?.startTime || null;
+    const activeSessionSeconds = activeSessionStart
+      ? Math.max(0, Math.floor((Date.now() - new Date(activeSessionStart).getTime()) / 1000))
+      : 0;
+
     // Calculate totals
     const totalSessions = todaysSessions.length;
-    const totalTimeTracked = todaysSessions.reduce(
+    const sessionsMinutes = todaysSessions.reduce(
       (sum, session) => sum + (session.duration || 0),
       0
     );
+    const normalizedSessionsMinutes = normalizeDurationMinutes(sessionsMinutes);
+
+    const summaryMinutes = normalizeDurationMinutes(dailySummary?.totalTimeTracked || 0);
+    const summarySeconds = Math.round(summaryMinutes * 60);
+    const trackedTodaySeconds = Math.max(
+      0,
+      Number(tracked?.todaysTimeTrackedSeconds || 0)
+    );
+    const trackedSessionSeconds = Math.max(
+      0,
+      Number(tracked?.currentSessionTimeSeconds || 0)
+    );
+
+    const currentSessionTimeSeconds = Math.max(
+      trackedSessionSeconds,
+      activeSessionSeconds
+    );
+    const todaysTimeTrackedSeconds = Math.max(
+      trackedTodaySeconds,
+      summarySeconds,
+      Math.round(normalizedSessionsMinutes * 60),
+      currentSessionTimeSeconds
+    );
+    const totalTimeTracked = todaysTimeTrackedSeconds / 60;
+
     const totalCorrections = todaysSessions.reduce(
       (sum, session) => sum + (session.postureMetrics?.totalCorrections || 0),
       0
     );
+    const correctionsFromSummary = Number(dailySummary?.totalCorrections?.total || 0);
 
     // Calculate average score
     const averageScore =
@@ -708,16 +831,38 @@ router.get("/today-overview", authenticateToken, async (req, res, next) => {
             ) / totalSessions
           )
         : 0;
+    const averageScoreFromSummary = Math.round(Number(dailySummary?.averageScores?.overall || 0));
+
+    // Compute cumulative duration as prior days + today's tracked seconds.
+    const priorSummaries = await DailySummary.find({
+      userId,
+      date: { $lt: today },
+    })
+      .select("totalTimeTracked")
+      .lean();
+    const priorSeconds = priorSummaries.reduce(
+      (sum, s) => sum + Math.round(normalizeDurationMinutes(s.totalTimeTracked || 0) * 60),
+      0
+    );
+    const cumulativeTimeSeconds = priorSeconds + Math.round(todaysTimeTrackedSeconds);
+    const hasActiveSession =
+      !!activeSession || !!activeDbSession || currentSessionTimeSeconds > 0;
 
     res.json({
       success: true,
       data: {
         totalSessions,
         totalTimeTracked,
-        totalCorrections,
-        averageScore,
-        hasActiveSession: !!activeSession,
-        activeSessionId: activeSession?.sessionId || null,
+        totalTimeTrackedSeconds: Math.round(todaysTimeTrackedSeconds),
+        todaysTimeTrackedSeconds: Math.round(todaysTimeTrackedSeconds),
+        currentSessionTimeSeconds: Math.round(currentSessionTimeSeconds),
+        totalCorrections: Math.max(totalCorrections, correctionsFromSummary),
+        averageScore: Math.max(averageScore, averageScoreFromSummary),
+        hasActiveSession,
+        activeSessionId:
+          activeSession?.sessionId || activeDbSession?.deviceInfo?.sessionId || null,
+        cumulativeTime: formatSecondsAsHms(cumulativeTimeSeconds),
+        cumulativeTimeSeconds,
       },
     });
   } catch (error) {
@@ -798,6 +943,9 @@ router.get("/trend/:timeRange", authenticateToken, async (req, res) => {
   try {
     const { timeRange } = req.params;
     const targetUserId = req.userId;
+    const targetUserObjectId = mongoose.Types.ObjectId.isValid(targetUserId)
+      ? new mongoose.Types.ObjectId(targetUserId)
+      : null;
 
     // Calculate date range based on timeRange
     const now = new Date();
@@ -824,9 +972,22 @@ router.get("/trend/:timeRange", authenticateToken, async (req, res) => {
 
     const trendData = await PostureSession.aggregate([
       {
+        $addFields: {
+          normalizedUserId: { $ifNull: ["$userId", "$user_id"] },
+          normalizedStartTime: { $ifNull: ["$startTime", "$start_time"] },
+          normalizedCorrections: { $ifNull: ["$postureMetrics", "$corrections"] },
+          normalizedScores: "$scores",
+        },
+      },
+      {
         $match: {
-          user_id: targetUserId,
-          start_time: { $gte: startDate },
+          normalizedStartTime: { $gte: startDate },
+          $or: [
+            { normalizedUserId: targetUserId },
+            ...(targetUserObjectId
+              ? [{ normalizedUserId: targetUserObjectId }]
+              : []),
+          ],
         },
       },
       {
@@ -835,17 +996,17 @@ router.get("/trend/:timeRange", authenticateToken, async (req, res) => {
             date: {
               $dateToString: {
                 format: "%Y-%m-%d",
-                date: "$start_time",
+                date: "$normalizedStartTime",
               },
             },
           },
           total_time_tracked: { $sum: "$duration" },
           session_count: { $sum: 1 },
           total_corrections: {
-            $push: "$corrections",
+            $push: "$normalizedCorrections",
           },
           average_scores: {
-            $push: "$scores",
+            $push: "$normalizedScores",
           },
         },
       },
@@ -861,7 +1022,9 @@ router.get("/trend/:timeRange", authenticateToken, async (req, res) => {
                 $map: {
                   input: "$total_corrections",
                   as: "correction",
-                  in: "$$correction.head_tilt",
+                  in: {
+                    $ifNull: ["$$correction.head_tilt", "$$correction.headTiltCount"],
+                  },
                 },
               },
             },
@@ -870,7 +1033,12 @@ router.get("/trend/:timeRange", authenticateToken, async (req, res) => {
                 $map: {
                   input: "$total_corrections",
                   as: "correction",
-                  in: "$$correction.shoulder_bend",
+                  in: {
+                    $ifNull: [
+                      "$$correction.shoulder_bend",
+                      "$$correction.shoulderBendingCount",
+                    ],
+                  },
                 },
               },
             },
@@ -879,7 +1047,9 @@ router.get("/trend/:timeRange", authenticateToken, async (req, res) => {
                 $map: {
                   input: "$total_corrections",
                   as: "correction",
-                  in: "$$correction.back_bend",
+                  in: {
+                    $ifNull: ["$$correction.back_bend", "$$correction.backBendingCount"],
+                  },
                 },
               },
             },
@@ -888,7 +1058,9 @@ router.get("/trend/:timeRange", authenticateToken, async (req, res) => {
                 $map: {
                   input: "$total_corrections",
                   as: "correction",
-                  in: "$$correction.too_close",
+                  in: {
+                    $ifNull: ["$$correction.too_close", "$$correction.proximityWarnings"],
+                  },
                 },
               },
             },
@@ -899,7 +1071,7 @@ router.get("/trend/:timeRange", authenticateToken, async (req, res) => {
                 $map: {
                   input: "$average_scores",
                   as: "score",
-                  in: "$$score.overall",
+                  in: { $ifNull: ["$$score.overall", "$$score.overallScore"] },
                 },
               },
             },
@@ -908,7 +1080,9 @@ router.get("/trend/:timeRange", authenticateToken, async (req, res) => {
                 $map: {
                   input: "$average_scores",
                   as: "score",
-                  in: "$$score.head_tilt",
+                  in: {
+                    $ifNull: ["$$score.head_tilt", "$$score.headTiltScore"],
+                  },
                 },
               },
             },
@@ -917,7 +1091,12 @@ router.get("/trend/:timeRange", authenticateToken, async (req, res) => {
                 $map: {
                   input: "$average_scores",
                   as: "score",
-                  in: "$$score.shoulder_bend",
+                  in: {
+                    $ifNull: [
+                      "$$score.shoulder_bend",
+                      "$$score.shoulderAlignmentScore",
+                    ],
+                  },
                 },
               },
             },
@@ -926,7 +1105,9 @@ router.get("/trend/:timeRange", authenticateToken, async (req, res) => {
                 $map: {
                   input: "$average_scores",
                   as: "score",
-                  in: "$$score.back_bend",
+                  in: {
+                    $ifNull: ["$$score.back_bend", "$$score.spinalPostureScore"],
+                  },
                 },
               },
             },
@@ -972,20 +1153,33 @@ router.post("/update-realtime", authenticateToken, async (req, res, next) => {
       timestamp,
       duration_seconds,
     } = req.body;
+    const feedbackList = Array.isArray(feedback) ? feedback : [];
+    const correctionIncrement = Array.isArray(feedback)
+      ? feedback.length
+      : Math.max(0, Number(feedback) || 0);
 
-    if (!user_id || !session_id) {
+    const authenticatedUserId = req.userId?.toString?.();
+
+    if (!authenticatedUserId || !session_id) {
       return res.status(400).json({
         success: false,
-        message: "User ID and session ID are required",
+        message: "Authentication and session ID are required",
+      });
+    }
+
+    if (!isCurrentUserIdentifier(req, user_id)) {
+      return res.status(403).json({
+        success: false,
+        message: "Forbidden: user_id does not match authenticated user",
       });
     }
 
     logger.info(
-      `Real-time update for user: ${user_id}, session: ${session_id}`
+      `Real-time update for user: ${authenticatedUserId}, session: ${session_id}`
     );
 
     // Find user by ID first to ensure proper data association
-    const user = await User.findById(user_id);
+    const user = await User.findById(authenticatedUserId);
     if (!user) {
       return res.status(404).json({
         success: false,
@@ -998,15 +1192,18 @@ router.post("/update-realtime", authenticateToken, async (req, res, next) => {
     today.setHours(0, 0, 0, 0);
 
     let session = await PostureSession.findOne({
-      userId: user_id,
+      userId: authenticatedUserId,
       "deviceInfo.sessionId": session_id,
       startTime: { $gte: today },
     });
+    const previousSessionDuration = session
+      ? Math.max(0, Number(session.duration) || 0)
+      : 0;
 
     if (!session) {
       // Create new session with comprehensive data structure
       session = new PostureSession({
-        userId: user_id,
+        userId: authenticatedUserId,
         startTime: new Date(timestamp || Date.now()),
         scores: {
           headTiltScore: scores?.headTilt || 0,
@@ -1017,7 +1214,7 @@ router.post("/update-realtime", authenticateToken, async (req, res, next) => {
           overallScore: scores?.overallScore || 0,
         },
         postureMetrics: {
-          totalCorrections: Array.isArray(feedback) ? feedback.length : 0,
+          totalCorrections: correctionIncrement,
           headTiltCount: 0,
           shoulderBendingCount: 0,
           backBendingCount: 0,
@@ -1029,11 +1226,12 @@ router.post("/update-realtime", authenticateToken, async (req, res, next) => {
           sessionId: session_id,
           platform: "Real-time Analysis",
         },
-        feedback: Array.isArray(feedback) ? feedback : [],
+        feedback: feedbackList,
         status: "active",
       });
+      session.duration = Math.max(0, Number(duration_seconds) || 0) / 60;
 
-      logger.info(`Created new session for user ${user_id}`);
+      logger.info(`Created new session for user ${authenticatedUserId}`);
     } else {
       // Update existing session with incremental data
       session.scores = {
@@ -1052,8 +1250,7 @@ router.post("/update-realtime", authenticateToken, async (req, res, next) => {
       session.postureMetrics = {
         ...session.postureMetrics,
         totalCorrections:
-          (session.postureMetrics?.totalCorrections || 0) +
-          (Array.isArray(feedback) ? feedback.length : 0),
+          (session.postureMetrics?.totalCorrections || 0) + correctionIncrement,
         averagePostureScore:
           scores?.overallScore ||
           session.postureMetrics?.averagePostureScore ||
@@ -1061,34 +1258,41 @@ router.post("/update-realtime", authenticateToken, async (req, res, next) => {
         blinkRate: blink_rate || session.postureMetrics?.blinkRate || 0,
       };
 
-      if (Array.isArray(feedback) && feedback.length > 0) {
-        session.feedback = [...(session.feedback || []), ...feedback];
+      if (feedbackList.length > 0) {
+        session.feedback = [...(session.feedback || []), ...feedbackList];
       }
 
       session.endTime = new Date(timestamp || Date.now());
       session.duration =
-        duration_seconds ||
-        Math.floor((session.endTime - session.startTime) / 1000);
+        duration_seconds !== undefined && duration_seconds !== null
+          ? Math.max(0, Number(duration_seconds) || 0) / 60
+          : Math.floor((session.endTime - session.startTime) / (1000 * 60));
       session.lastUpdate = new Date();
 
-      logger.info(`Updated existing session for user ${user_id}`);
+      logger.info(`Updated existing session for user ${authenticatedUserId}`);
     }
 
     await session.save();
 
+    // Accumulate only newly added duration for this session update.
+    const sessionDurationIncrement = Math.max(
+      0,
+      (Number(session.duration) || 0) - previousSessionDuration
+    );
+
     // Update or create daily summary with REAL-TIME DATA PERSISTENCE
     const dateStr = today.toISOString().split("T")[0];
     let dailySummary = await DailySummary.findOne({
-      userId: user_id,
+      userId: authenticatedUserId,
       date: today,
     });
 
     if (!dailySummary) {
       // Create new daily summary
       dailySummary = new DailySummary({
-        userId: user_id,
+        userId: authenticatedUserId,
         date: today,
-        totalTimeTracked: duration_seconds || 0,
+        totalTimeTracked: sessionDurationIncrement,
         averageScores: {
           headTilt: scores?.headTilt || 0,
           shoulderAlignment: scores?.shoulderAlignment || 0,
@@ -1102,21 +1306,19 @@ router.post("/update-realtime", authenticateToken, async (req, res, next) => {
           shoulderCorrections: 0,
           backCorrections: 0,
           proximityWarnings: 0,
-          total: Array.isArray(feedback) ? feedback.length : 0,
+          total: correctionIncrement,
         },
         sessionsCount: 1,
       });
 
       logger.info(
-        `Created new daily summary for user ${user_id} on ${dateStr}`
+        `Created new daily summary for user ${authenticatedUserId} on ${dateStr}`
       );
     } else {
       // Update existing daily summary with weighted averages
       const currentSessions = dailySummary.sessionsCount;
-      dailySummary.totalTimeTracked = Math.max(
-        dailySummary.totalTimeTracked,
-        duration_seconds || 0
-      );
+      dailySummary.totalTimeTracked =
+        (dailySummary.totalTimeTracked || 0) + sessionDurationIncrement;
 
       // Calculate weighted averages for scores
       if (scores) {
@@ -1188,16 +1390,48 @@ router.post("/update-realtime", authenticateToken, async (req, res, next) => {
         proximityWarnings:
           dailySummary.totalCorrections?.proximityWarnings || 0,
         total:
-          (dailySummary.totalCorrections?.total || 0) +
-          (Array.isArray(feedback) ? feedback.length : 0),
+          (dailySummary.totalCorrections?.total || 0) + correctionIncrement,
       };
 
       dailySummary.sessionsCount = currentSessions + 1;
 
-      logger.info(`Updated daily summary for user ${user_id} on ${dateStr}`);
+      logger.info(
+        `Updated daily summary for user ${authenticatedUserId} on ${dateStr}`
+      );
     }
 
+    // Compute cumulativeDuration: sum of all prior days' totalTimeTracked (in seconds) + today
+    const priorSummaries = await DailySummary.find({
+      userId: authenticatedUserId,
+      date: { $lt: today },
+    }).select('totalTimeTracked').lean();
+    const priorSeconds = priorSummaries.reduce(
+      (sum, s) => sum + (s.totalTimeTracked || 0) * 60, 0
+    );
+    dailySummary.cumulativeDuration = priorSeconds + (dailySummary.totalTimeTracked || 0) * 60;
+
     await dailySummary.save();
+
+    // --- Persist tracked time to TrackedTime collection ---
+    // This ensures the today-overview endpoint reads accurate
+    // todaysTimeTrackedSeconds / currentSessionTimeSeconds values
+    // instead of relying solely on the fallback activeSessionSeconds
+    // calculation, which can lag behind the real ticking timer.
+    const currentSessionSec = Math.max(0, Math.round(Number(duration_seconds) || 0));
+    const todayTotalSec = Math.max(
+      currentSessionSec,
+      Math.round((dailySummary.totalTimeTracked || 0) * 60)
+    );
+    await TrackedTime.findOneAndUpdate(
+      { userId: authenticatedUserId, date: today },
+      {
+        $max: {
+          todaysTimeTrackedSeconds: todayTotalSec,
+          currentSessionTimeSeconds: currentSessionSec,
+        },
+      },
+      { upsert: true }
+    );
 
     // Return comprehensive response for frontend
     res.json({
@@ -1205,7 +1439,7 @@ router.post("/update-realtime", authenticateToken, async (req, res, next) => {
       message: "Realtime data updated successfully",
       data: {
         sessionId: session.deviceInfo?.sessionId || session_id,
-        userId: user_id,
+        userId: authenticatedUserId,
         currentScores: session.scores,
         totalCorrections: dailySummary.totalCorrections.total,
         sessionDuration: session.duration || 0,
@@ -1230,7 +1464,7 @@ router.post("/update-realtime", authenticateToken, async (req, res, next) => {
 // Get hourly trends for real-time charts
 router.get("/hourly-trends", authenticateToken, async (req, res) => {
   try {
-    const userId = req.user.userId;
+    const userId = req.userId || req.user?._id;
     console.log(`📊 Fetching hourly trends for user: ${userId}`);
 
     const now = new Date();
@@ -1358,7 +1592,7 @@ router.get("/hourly-trends", authenticateToken, async (req, res) => {
 // Live dashboard endpoint for real-time stats
 router.get("/live-dashboard", authenticateToken, async (req, res) => {
   try {
-    const userId = req.user.userId;
+    const userId = req.userId || req.user?._id;
     console.log(`📊 Fetching live dashboard stats for user: ${userId}`);
 
     const now = new Date();
@@ -1419,7 +1653,6 @@ module.exports = router;
 
 // --- Appended: Tracked Time Integration Endpoints ---
 // Minimal endpoints for Flask and Frontend to sync and fetch tracked time
-const { TrackedTime } = require("../models");
 
 /**
  * @route POST /api/posture/tracked-time
@@ -1434,10 +1667,17 @@ router.post("/tracked-time", authenticateToken, async (req, res) => {
       todays_time_tracked_seconds,
       current_session_time_seconds,
     } = req.body || {};
-    if (!user_id || !date) {
+    if (!req.userId || !date) {
       return res
         .status(400)
-        .json({ success: false, message: "user_id and date are required" });
+        .json({ success: false, message: "Authentication and date are required" });
+    }
+
+    if (!isCurrentUserIdentifier(req, user_id)) {
+      return res.status(403).json({
+        success: false,
+        message: "Forbidden: user_id does not match authenticated user",
+      });
     }
 
     // Use the authenticated user
@@ -1481,21 +1721,24 @@ router.post("/tracked-time", authenticateToken, async (req, res) => {
  */
 router.get("/tracked-time", authenticateToken, async (req, res) => {
   try {
-    const userId = req.query.user_id;
+    const userId = req.query.user_id || req.userId;
     const date = req.query.date;
-    if (!userId || !date) {
+    if (!req.userId || !date) {
       return res
         .status(400)
-        .json({ success: false, message: "user_id and date are required" });
+        .json({ success: false, message: "Authentication and date are required" });
     }
-    // Find user by username
-    const user = await User.findOne({ username: userId });
-    if (!user) {
-      return res.json({ success: true, data: null });
+
+    if (!isCurrentUserIdentifier(req, userId)) {
+      return res.status(403).json({
+        success: false,
+        message: "Forbidden: user_id does not match authenticated user",
+      });
     }
+
     const d = new Date(date);
     d.setHours(0, 0, 0, 0);
-    const doc = await TrackedTime.findOne({ userId: user._id, date: d });
+    const doc = await TrackedTime.findOne({ userId: req.userId, date: d });
     return res.json({ success: true, data: doc });
   } catch (err) {
     logger.error("Error fetching tracked time", err);
@@ -1536,10 +1779,17 @@ router.post("/tracked-time-normalized", authenticateToken, async (req, res) => {
       todays_time_tracked_seconds,
       current_session_time_seconds,
     } = req.body || {};
-    if (!user_id || !date) {
+    if (!req.userId || !date) {
       return res
         .status(400)
-        .json({ success: false, message: "user_id and date are required" });
+        .json({ success: false, message: "Authentication and date are required" });
+    }
+
+    if (!isCurrentUserIdentifier(req, user_id)) {
+      return res.status(403).json({
+        success: false,
+        message: "Forbidden: user_id does not match authenticated user",
+      });
     }
     // Use the authenticated user
     const user = await User.findById(req.userId);
@@ -1576,17 +1826,23 @@ router.post("/tracked-time-normalized", authenticateToken, async (req, res) => {
  */
 router.get("/tracked-time-normalized", authenticateToken, async (req, res) => {
   try {
-    const userId = req.query.user_id;
+    const userId = req.query.user_id || req.userId;
     const date = req.query.date;
-    if (!userId || !date) {
+    if (!req.userId || !date) {
       return res
         .status(400)
-        .json({ success: false, message: "user_id and date are required" });
+        .json({ success: false, message: "Authentication and date are required" });
     }
-    const user = await User.findOne({ username: userId });
-    if (!user) return res.json({ success: true, data: null });
+
+    if (!isCurrentUserIdentifier(req, userId)) {
+      return res.status(403).json({
+        success: false,
+        message: "Forbidden: user_id does not match authenticated user",
+      });
+    }
+
     const d = toLocalMidnight(date);
-    const doc = await TrackedTime.findOne({ userId: user._id, date: d });
+    const doc = await TrackedTime.findOne({ userId: req.userId, date: d });
     return res.json({ success: true, data: doc });
   } catch (err) {
     logger.error("Error fetching tracked time (normalized)", err);

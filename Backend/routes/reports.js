@@ -2,9 +2,30 @@ const express = require("express");
 const { query, validationResult } = require("express-validator");
 const { PostureSession, PosturePattern, DailySummary } = require("../models");
 const { buildDailyEmail } = require("../services/dailyReportService");
+const { sendMail } = require("../services/emailService");
 const logger = require("../utils/logger");
 
 const router = express.Router();
+
+// Send today's daily email to the authenticated user
+router.post("/send-daily-email", async (req, res) => {
+  try {
+    const { to, subject, html } = await buildDailyEmail(req.userId, new Date());
+
+    const info = await sendMail({ to, subject, html });
+    if (info?.skipped) {
+      return res.status(202).json({
+        success: false,
+        message: "Email skipped (SMTP not configured)",
+      });
+    }
+
+    return res.json({ success: true, messageId: info.messageId });
+  } catch (err) {
+    logger.error("Failed to send daily email:", err);
+    return res.status(500).json({ success: false, message: err.message });
+  }
+});
 
 // Preview today's daily email content (no send)
 router.get("/preview-daily-email", async (req, res) => {

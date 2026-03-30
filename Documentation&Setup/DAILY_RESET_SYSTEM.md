@@ -221,9 +221,9 @@ npm run dev
 
 3. **Start Python Service**
 ```bash  
-cd Backend/python
+cd Backend
 pip install -r requirements.txt
-python posture_detector.py
+python backend.py
 ```
 
 4. **Database Setup**

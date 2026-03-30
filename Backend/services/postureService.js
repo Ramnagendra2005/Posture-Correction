@@ -160,8 +160,7 @@ class PostureService extends EventEmitter {
       const pythonScriptPath = path.join(
         __dirname,
         "..",
-        "python",
-        "posture_detector.py"
+        "backend.py"
       );
 
       // Python process arguments
@@ -413,26 +412,47 @@ class PostureService extends EventEmitter {
 
       // Update summary data
       summary.totalTimeTracked += session.duration;
-      summary.sessionsCount += 1;
+      const previousSessionCount = Math.max(
+        0,
+        Number(summary.sessionsCount) || 0
+      );
+      const sessionCount = previousSessionCount + 1;
+      summary.sessionsCount = sessionCount;
 
-      // Update average scores
-      const sessionCount = summary.sessionsCount;
-      summary.averageScores.headTilt =
-        (summary.averageScores.headTilt * (sessionCount - 1) +
-          session.scores.headTiltScore) /
-        sessionCount;
-      summary.averageScores.shoulderAlignment =
-        (summary.averageScores.shoulderAlignment * (sessionCount - 1) +
-          session.scores.shoulderAlignmentScore) /
-        sessionCount;
-      summary.averageScores.spinalPosture =
-        (summary.averageScores.spinalPosture * (sessionCount - 1) +
-          session.scores.spinalPostureScore) /
-        sessionCount;
-      summary.averageScores.overall =
-        (summary.averageScores.overall * (sessionCount - 1) +
-          session.scores.overallScore) /
-        sessionCount;
+      const safeNumber = (value, fallback = 0) => {
+        const parsed = Number(value);
+        return Number.isFinite(parsed) ? parsed : fallback;
+      };
+
+      const runningAverage = (previousAverage, latestValue) => {
+        const current = safeNumber(latestValue);
+        if (previousSessionCount === 0) {
+          return current;
+        }
+
+        return (
+          (safeNumber(previousAverage) * previousSessionCount + current) /
+          sessionCount
+        );
+      };
+
+      // Update average scores using prior-count baseline to avoid default-score inflation.
+      summary.averageScores.headTilt = runningAverage(
+        summary.averageScores.headTilt,
+        session.scores.headTiltScore
+      );
+      summary.averageScores.shoulderAlignment = runningAverage(
+        summary.averageScores.shoulderAlignment,
+        session.scores.shoulderAlignmentScore
+      );
+      summary.averageScores.spinalPosture = runningAverage(
+        summary.averageScores.spinalPosture,
+        session.scores.spinalPostureScore
+      );
+      summary.averageScores.overall = runningAverage(
+        summary.averageScores.overall,
+        session.scores.overallScore
+      );
 
       // Update corrections
       summary.totalCorrections.headTiltCorrections +=
@@ -447,12 +467,10 @@ class PostureService extends EventEmitter {
       summary.eyeHealthMetrics.totalBlinks += session.eyeHealth.blinkCount;
       summary.eyeHealthMetrics.lowBlinkPeriods +=
         session.eyeHealth.lowBlinkWarnings;
-      if (sessionCount > 0) {
-        summary.eyeHealthMetrics.averageBlinkRate =
-          (summary.eyeHealthMetrics.averageBlinkRate * (sessionCount - 1) +
-            session.eyeHealth.averageBlinkRate) /
-          sessionCount;
-      }
+      summary.eyeHealthMetrics.averageBlinkRate = runningAverage(
+        summary.eyeHealthMetrics.averageBlinkRate,
+        session.eyeHealth.averageBlinkRate
+      );
 
       // Update quality metrics
       summary.qualityMetrics.bestSessionScore = Math.max(
@@ -463,6 +481,16 @@ class PostureService extends EventEmitter {
         summary.qualityMetrics.worstSessionScore,
         session.scores.overallScore
       );
+
+      // Compute cumulativeDuration before saving
+      const priorSummaries = await DailySummary.find({
+        userId,
+        date: { $lt: today },
+      }).select('totalTimeTracked').lean();
+      const priorSeconds = priorSummaries.reduce(
+        (sum, s) => sum + (s.totalTimeTracked || 0) * 60, 0
+      );
+      summary.cumulativeDuration = priorSeconds + (summary.totalTimeTracked || 0) * 60;
 
       await summary.save();
     } catch (error) {

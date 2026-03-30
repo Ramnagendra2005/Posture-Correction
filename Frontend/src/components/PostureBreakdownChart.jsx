@@ -4,7 +4,7 @@ import useAuth from '../hooks/useAuth';
 
 const API_BASE = import.meta.env.VITE_API_BASE_URL || 'http://localhost:3001';
 
-const PostureBreakdownChart = ({ userId, timeRange = 'daily' }) => {
+const PostureBreakdownChart = ({ timeRange = 'daily' }) => {
   const [data, setData] = useState(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);
@@ -23,10 +23,10 @@ const PostureBreakdownChart = ({ userId, timeRange = 'daily' }) => {
     try {
       setLoading(true);
       
-      let endpoint = `/api/posture/report/${timeRange}`;
-      if (userId) {
-        endpoint += `/${userId}`;
-      }
+      const normalizedTimeRange = ['daily', 'weekly', 'monthly'].includes(timeRange)
+        ? timeRange
+        : 'daily';
+      const endpoint = `/api/posture/report/${normalizedTimeRange}`;
 
   const response = await fetch(`${API_BASE}${endpoint}`, {
         headers: token ? {
@@ -42,15 +42,36 @@ const PostureBreakdownChart = ({ userId, timeRange = 'daily' }) => {
       }
 
       const result = await response.json();
+
+      // The backend has used multiple response shapes over time.
+      // Normalize here so the chart works across both legacy and current payloads.
+      const payload = result.summary || result?.data?.summary || result;
       
       // Transform data for charts
-      const scores = result.average_scores || result.scores || {};
-      const corrections = result.total_corrections || result.corrections || {};
+      const scores = payload.average_scores || payload.averageScores || payload.scores || {};
+      const corrections =
+        payload.total_corrections || payload.totalCorrections || payload.corrections || {};
+
+      const headTiltCorrections =
+        corrections.head_tilt ?? corrections.headTiltCorrections ?? 0;
+      const shoulderCorrections =
+        corrections.shoulder_bend ?? corrections.shoulderCorrections ?? 0;
+      const backCorrections =
+        corrections.back_bend ?? corrections.backCorrections ?? 0;
+      const proximityCorrections =
+        corrections.too_close ?? corrections.proximityWarnings ?? 0;
+
+      const headTiltScore = scores.head_tilt ?? scores.headTilt ?? 0;
+      const shoulderScore = scores.shoulder_bend ?? scores.shoulderAlignment ?? 0;
+      const backScore = scores.back_bend ?? scores.spinalPosture ?? 0;
+      const proximityScore = scores.too_close ?? scores.proximityScore ?? 0;
+      const overallScore = scores.overall ?? 0;
 
       // Calculate good posture percentage
-      const totalIssues = (corrections.head_tilt || 0) + (corrections.shoulder_bend || 0) + 
-                         (corrections.back_bend || 0) + (corrections.too_close || 0);
-      const totalTime = result.total_time_tracked || result.time_tracked || 1;
+      const totalIssues =
+        headTiltCorrections + shoulderCorrections + backCorrections + proximityCorrections;
+      const totalTime =
+        payload.total_time_tracked ?? payload.time_tracked ?? payload.totalTimeTracked ?? 0;
       const goodPostureTime = Math.max(0, totalTime - (totalIssues * 0.1)); // Estimate good posture time
 
       // Helper function to ensure valid numeric values
@@ -63,36 +84,36 @@ const PostureBreakdownChart = ({ userId, timeRange = 'daily' }) => {
       const chartData = [
         {
           name: 'Head Tilt Issues',
-          value: safeValue(corrections.head_tilt),
-          score: safeScore(scores.head_tilt),
+          value: safeValue(headTiltCorrections),
+          score: safeScore(headTiltScore),
           color: colors.head_tilt,
           description: 'Forward head posture corrections'
         },
         {
           name: 'Shoulder Issues', 
-          value: safeValue(corrections.shoulder_bend),
-          score: safeScore(scores.shoulder_bend),
+          value: safeValue(shoulderCorrections),
+          score: safeScore(shoulderScore),
           color: colors.shoulder_bend,
           description: 'Shoulder misalignment corrections'
         },
         {
           name: 'Back Issues',
-          value: safeValue(corrections.back_bend), 
-          score: safeScore(scores.back_bend),
+          value: safeValue(backCorrections), 
+          score: safeScore(backScore),
           color: colors.back_bend,
           description: 'Spinal curvature corrections'
         },
         {
           name: 'Proximity Issues',
-          value: safeValue(corrections.too_close),
-          score: safeScore(scores.too_close), 
+          value: safeValue(proximityCorrections),
+          score: safeScore(proximityScore), 
           color: colors.too_close,
           description: 'Too close to screen corrections'
         },
         {
           name: 'Good Posture',
           value: safeValue(Math.round(goodPostureTime)),
-          score: safeValue(scores.overall),
+          score: safeValue(overallScore),
           color: colors.good_posture,
           description: 'Time with good posture'
         }
@@ -110,7 +131,7 @@ const PostureBreakdownChart = ({ userId, timeRange = 'daily' }) => {
     } finally {
       setLoading(false);
     }
-  }, [userId, timeRange, token, colors.head_tilt, colors.shoulder_bend, colors.back_bend, colors.too_close, colors.good_posture]);
+  }, [timeRange, token, colors.head_tilt, colors.shoulder_bend, colors.back_bend, colors.too_close, colors.good_posture]);
 
   useEffect(() => {
     fetchBreakdownData();

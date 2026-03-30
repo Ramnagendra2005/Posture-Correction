@@ -1,4 +1,4 @@
-import React, { useEffect, useState, useRef, useCallback } from "react";
+import React, { useEffect, useState, useRef, useCallback, useMemo } from "react";
 import { AlertCircle, ChevronDown, Camera, Check, Info, BarChart2, Clock, RefreshCw, Coffee } from "lucide-react";
 import { motion, AnimatePresence, useAnimation } from "framer-motion";
 import { useInView } from "react-intersection-observer";
@@ -8,7 +8,7 @@ const API_BASE = import.meta.env.VITE_API_BASE_URL || "http://localhost:3001";
 
 const Analysis = () => {
   const [feedback, setFeedback] = useState([]);
-  const [overview, setOverview] = useState({
+  const [, setOverview] = useState({
     postureScore: 0,
     timeTracked: "0:00:00",
     corrections: 0,
@@ -25,14 +25,14 @@ const Analysis = () => {
   const [isLoading, setIsLoading] = useState(true);
   const [showFeedback, setShowFeedback] = useState(true);
   const [cameraError, setCameraError] = useState(false);
-  const [animateScore, setAnimateScore] = useState(false);
+  const [, setAnimateScore] = useState(false);
   const [isSessionActive, setIsSessionActive] = useState(false);
   const [isStoppingAnalysis, setIsStoppingAnalysis] = useState(false);
   const [sessionStartTime, setSessionStartTime] = useState(null);
   const [elapsedTime, setElapsedTime] = useState(0);
   const [correctionsCount, setCorrectionsCount] = useState(0);
   const [lastFeedbackCount, setLastFeedbackCount] = useState(0);
-  const [performanceMetrics, setPerformanceMetrics] = useState({
+  const [, setPerformanceMetrics] = useState({
     fps: 30,
     latency: 45,
     accuracy: 98.5,
@@ -41,9 +41,23 @@ const Analysis = () => {
   // --- Appended: tracked time from DB (via Node) ---
   const [trackedTime, setTrackedTime] = useState({
     todays_time_tracked_seconds: 0,
-    current_section_time_seconds: 0,
+    current_session_time_seconds: 0,
+    synced_at_ms: Date.now(),
   });
+  const [clockTick, setClockTick] = useState(Date.now());
+  // Frozen display values captured at stop-time to prevent post-stop drift.
+  const frozenDisplayRef = useRef(null);
   const videoRef = useRef(null);
+  const [videoFeedNonce, setVideoFeedNonce] = useState(Date.now());
+  const backendSessionIdRef = useRef(null);
+  const latestScoresRef = useRef(scores);
+  const latestCorrectionsRef = useRef(correctionsCount);
+  const elapsedTimeRef = useRef(0);
+  const lastFeedbackCountRef = useRef(0);
+  const isSessionActiveRef = useRef(false);
+  // Guard: when the user explicitly stops, block auto-reactivation from
+  // backend polls until they explicitly click Start again.
+  const stoppedByUserRef = useRef(false);
   const controls = useAnimation();
   const { token, user } = useAuth();
   const [ref, inView] = useInView({
@@ -73,85 +87,91 @@ const Analysis = () => {
     return `${hours}:${minutes.toString().padStart(2, '0')}:${secs.toString().padStart(2, '0')}`;
   }, []);
 
-  // --- Appended: poll tracked time from Node DB ---
-  useEffect(() => {
-    let timer;
-    const fetchTracked = async () => {
-      if (!token) return; // Require auth token
-      try {
-        const today = new Date();
-        const dateStr = today.toISOString();
-        const y = today.getFullYear();
-        const m = `${today.getMonth() + 1}`.padStart(2, '0');
-        const d = `${today.getDate()}`.padStart(2, '0');
-        const ymd = `${y}-${m}-${d}`; // for normalized endpoints
-        const userId = (user?.username || user?.id || 'flask-user');
-        const authHeaders = {
-          'Authorization': `Bearer ${token}`,
-          'Content-Type': 'application/json'
-        };
-        // Try normalized GET first
-        let res = await fetch(`${API_BASE}/api/posture/tracked-time-normalized?user_id=${encodeURIComponent(userId)}&date=${encodeURIComponent(ymd)}`, {
-          headers: authHeaders
-        });
-        let data = await res.json();
-        if (data?.success && data?.data) {
-          setTrackedTime({
-            todays_time_tracked_seconds: data.data.todaysTimeTrackedSeconds || 0,
-            current_section_time_seconds: data.data.currentSessionTimeSeconds || 0,
-          });
-        } else {
-          // Try non-normalized GET
-          res = await fetch(`${API_BASE}/api/posture/tracked-time?user_id=${encodeURIComponent(userId)}&date=${encodeURIComponent(dateStr)}`, {
-            headers: authHeaders
-          });
-          data = await res.json();
-          if (data?.success && data?.data) {
-            setTrackedTime({
-              todays_time_tracked_seconds: data.data.todaysTimeTrackedSeconds || 0,
-              current_section_time_seconds: data.data.currentSessionTimeSeconds || 0,
-            });
-          } else {
-            // Last resort: read from Flask directly and upsert into Node
-            try {
-              const f = await fetch('http://localhost:5001/tracked_time');
-              const ft = await f.json();
-              if (typeof ft?.todays_time_tracked_seconds === 'number' && typeof ft?.current_section_time_seconds === 'number') {
-                setTrackedTime({
-                  todays_time_tracked_seconds: ft.todays_time_tracked_seconds,
-                  current_section_time_seconds: ft.current_section_time_seconds,
-                });
-                // Push into Node DB normalized
-                await fetch(`${API_BASE}/api/posture/tracked-time-normalized`, {
-                  method: 'POST',
-                  headers: authHeaders,
-                  body: JSON.stringify({
-                    user_id: userId || 'flask-user',
-                    date: ymd,
-                    todays_time_tracked_seconds: ft.todays_time_tracked_seconds,
-                    current_session_time_seconds: ft.current_section_time_seconds,
-                  }),
-                });
-              }
-            } catch (e2) {
-              void e2;
-            }
-          }
-        }
-      } catch (e) {
-        // ignore fetch errors (use e to satisfy linter)
-        void e;
-      }
-    };
-    fetchTracked();
-    timer = setInterval(fetchTracked, 5000);
-    return () => clearInterval(timer);
-  }, [user, token]);
+  const reloadVideoFeed = useCallback(() => {
+    setCameraError(false);
+    setIsLoading(true);
+    setVideoFeedNonce(Date.now());
+  }, []);
 
+  const toSeconds = useCallback((value) => {
+    const n = Number(value);
+    return Number.isFinite(n) && n > 0 ? Math.floor(n) : 0;
+  }, []);
+
+  const applyTrackedSnapshot = useCallback(
+    (nextTodaySeconds, nextCurrentSeconds, options = {}) => {
+      const allowTodayRegression = Boolean(options.allowTodayRegression);
+      const allowCurrentRegression = Boolean(options.allowCurrentRegression);
+      // Force a synced_at_ms reset (used on start/stop to re-anchor the clock).
+      const forceResync = Boolean(options.forceResync);
+
+      setTrackedTime((prev) => {
+        const prevToday = toSeconds(prev.todays_time_tracked_seconds);
+        const prevCurrent = toSeconds(prev.current_session_time_seconds);
+        const incomingToday = toSeconds(nextTodaySeconds);
+        const incomingCurrent = toSeconds(nextCurrentSeconds);
+
+        const resolvedToday = allowTodayRegression
+          ? incomingToday
+          : Math.max(prevToday, incomingToday);
+        const resolvedCurrent = allowCurrentRegression
+          ? incomingCurrent
+          : Math.max(prevCurrent, incomingCurrent);
+
+        // Only reset the sync anchor when the base value actually grew or
+        // when explicitly asked (start / stop).  This prevents the
+        // "sawtooth" pattern where a stale backend poll resets synced_at_ms
+        // back to now, zeroing the tick delta and making the timer jump.
+        const baseGrew =
+          resolvedToday > prevToday || resolvedCurrent > prevCurrent;
+        const newSyncedAt =
+          forceResync || baseGrew ? Date.now() : prev.synced_at_ms;
+
+        return {
+          todays_time_tracked_seconds: resolvedToday,
+          current_session_time_seconds: resolvedCurrent,
+          synced_at_ms: newSyncedAt,
+        };
+      });
+    },
+    [toSeconds]
+  );
+
+  const displayedTrackedTime = useMemo(() => {
+    // If the session was stopped, return the frozen snapshot.
+    if (!isSessionActive && frozenDisplayRef.current) {
+      return frozenDisplayRef.current;
+    }
+
+    const baseToday = toSeconds(trackedTime.todays_time_tracked_seconds);
+    const baseCurrent = toSeconds(trackedTime.current_session_time_seconds);
+
+    if (!isSessionActive) {
+      return {
+        todays_time_tracked_seconds: baseToday,
+        current_session_time_seconds: baseCurrent,
+      };
+    }
+
+    const syncedAtMs = Number(trackedTime.synced_at_ms) || Date.now();
+    const deltaSeconds = Math.max(
+      0,
+      Math.floor((clockTick - syncedAtMs) / 1000)
+    );
+
+    return {
+      todays_time_tracked_seconds: baseToday + deltaSeconds,
+      current_session_time_seconds: baseCurrent + deltaSeconds,
+    };
+  }, [trackedTime, isSessionActive, clockTick, toSeconds]);
 
   // Function to update backend with real-time data (optimized)
   const updateBackendRealtime = useCallback(async (scores, corrections) => {
     if (!token || !user?.id) return;
+
+    if (!backendSessionIdRef.current) {
+      backendSessionIdRef.current = `session_${user.id}_${Date.now()}`;
+    }
     
     try {
       const response = await fetch(`${API_BASE}/api/posture/update-realtime`, {
@@ -162,11 +182,11 @@ const Analysis = () => {
         },
         body: JSON.stringify({
           user_id: user.id,
-          session_id: `session_${Date.now()}`,
+          session_id: backendSessionIdRef.current,
           scores,
           feedback: corrections,
           timestamp: new Date().toISOString(),
-          duration_seconds: elapsedTime
+          duration_seconds: elapsedTimeRef.current
         })
       });
 
@@ -180,7 +200,7 @@ const Analysis = () => {
       console.error("Error updating backend with real-time data:", error);
       // Don't logout on API errors, just log them
     }
-  }, [token, user?.id, elapsedTime]);
+  }, [token, user?.id]);
 
   // Function to fetch feedback directly from Python service (OPTIMIZED)
   const fetchFeedback = useCallback(async () => {
@@ -193,18 +213,26 @@ const Analysis = () => {
         
         // Update feedback and detect new corrections
         const newFeedback = data.feedback || [];
-        if (newFeedback.length > lastFeedbackCount) {
+        const previousFeedbackCount = lastFeedbackCountRef.current;
+        if (newFeedback.length > previousFeedbackCount) {
           // New feedback received, count as correction
-          const newCorrections = newFeedback.length - lastFeedbackCount;
-          setCorrectionsCount(prev => prev + newCorrections);
+          const newCorrections = newFeedback.length - previousFeedbackCount;
+          setCorrectionsCount(prev => {
+            const next = prev + newCorrections;
+            latestCorrectionsRef.current = next;
+            return next;
+          });
+          lastFeedbackCountRef.current = newFeedback.length;
           setLastFeedbackCount(newFeedback.length);
         }
         setFeedback(newFeedback);
         
         if (data.scores) {
+          const previousOverallScore = latestScoresRef.current?.overallScore || 0;
+          latestScoresRef.current = data.scores;
           setScores(data.scores);
           // Trigger score animation when score changes significantly
-          if (Math.abs(data.scores.overallScore - scores.overallScore) > 5) {
+          if (Math.abs(data.scores.overallScore - previousOverallScore) > 5) {
             setAnimateScore(true);
             setTimeout(() => setAnimateScore(false), 2000);
           }
@@ -213,7 +241,7 @@ const Analysis = () => {
           setOverview(prev => ({
             ...prev,
             postureScore: Math.round(data.scores.overallScore),
-            corrections: correctionsCount
+            corrections: latestCorrectionsRef.current
           }));
         }
 
@@ -236,7 +264,7 @@ const Analysis = () => {
       setIsLoading(false);
       setCameraError(true); // Set camera error if service is unreachable
     }
-  }, [isSessionActive, lastFeedbackCount, correctionsCount, scores.overallScore]);
+  }, [isSessionActive]);
 
   // Function to fetch session overview from Node.js backend
   const fetchOverview = useCallback(async () => {
@@ -248,47 +276,112 @@ const Analysis = () => {
           'Authorization': `Bearer ${token}`
         }
       });
+
       if (response.ok) {
         const data = await response.json();
-        const overviewData = data.data;
-        
-        // Check if this is a new day (timer reset)
-        const currentDate = new Date().toDateString();
-        const lastResetDate = new Date(overviewData.lastReset).toDateString();
-        
-        if (currentDate !== lastResetDate) {
-          // Reset daily counters
-          setCorrectionsCount(0);
-          setLastFeedbackCount(0);
-          setSessionStartTime(null);
-          setElapsedTime(0);
+        const overviewData = data.data || {};
+
+        const overviewTodaySeconds = Number(
+          overviewData.todaysTimeTrackedSeconds ?? overviewData.totalTimeTrackedSeconds ?? 0
+        );
+        const overviewSessionSeconds = Number(
+          overviewData.currentSessionTimeSeconds ?? 0
+        );
+        const backendActive = Boolean(
+          overviewData.hasActiveSession || overviewData.isActiveSession
+        );
+
+        if (
+          Number.isFinite(overviewTodaySeconds) ||
+          Number.isFinite(overviewSessionSeconds)
+        ) {
+          applyTrackedSnapshot(
+            Number.isFinite(overviewTodaySeconds) ? overviewTodaySeconds : 0,
+            Number.isFinite(overviewSessionSeconds) ? overviewSessionSeconds : 0,
+            {
+              allowTodayRegression: false,
+              allowCurrentRegression: !backendActive,
+            }
+          );
         }
-        
+
+        if (overviewData.lastReset) {
+          const currentDate = new Date().toDateString();
+          const lastResetDate = new Date(overviewData.lastReset).toDateString();
+
+          if (currentDate !== lastResetDate) {
+            // Reset daily counters
+            setCorrectionsCount(0);
+            setLastFeedbackCount(0);
+            lastFeedbackCountRef.current = 0;
+            setSessionStartTime(null);
+            setElapsedTime(0);
+          }
+        }
+
         setOverview({
-          postureScore: overviewData.postureScore || scores.overallScore,
-          timeTracked: overviewData.timeTracked || "0:00:00",
-          corrections: overviewData.corrections || 0,
+          postureScore: overviewData.averageScore || scores.overallScore,
+          timeTracked: formatTime(
+            Math.round(
+              Number(overviewData.todaysTimeTrackedSeconds ?? overviewData.totalTimeTrackedSeconds)
+            ) || Math.round((overviewData.totalTimeTracked || 0) * 60)
+          ),
+          corrections: overviewData.totalCorrections || 0,
           breaksTaken: overviewData.breaksTaken || 0,
-          // Add cumulative time display
           cumulativeTime: overviewData.cumulativeTime || "0:00:00"
         });
-        
-        // Update corrections count from backend
-        setCorrectionsCount(overviewData.corrections || 0);
-        
-        // Set session active status
-        setIsSessionActive(overviewData.isActiveSession || false);
-        
+
+        const syncedCorrections = overviewData.totalCorrections || 0;
+        setCorrectionsCount(syncedCorrections);
+        latestCorrectionsRef.current = syncedCorrections;
+
+        // Only *activate* from backend — never deactivate.
+        // Deactivation is exclusively handled by stopAnalysis to prevent
+        // transient backend responses from flipping the session off/on and
+        // causing timer flicker.
+        if (backendActive && !isSessionActiveRef.current && !stoppedByUserRef.current) {
+          frozenDisplayRef.current = null; // clear any frozen snapshot
+          setIsSessionActive(true);
+        }
       }
     } catch (error) {
       console.error("Error fetching overview:", error);
     }
-  }, [token, scores.overallScore]);
+  }, [token, scores.overallScore, formatTime, applyTrackedSnapshot]);
+
+  useEffect(() => {
+    latestScoresRef.current = scores;
+  }, [scores]);
+
+  useEffect(() => {
+    latestCorrectionsRef.current = correctionsCount;
+  }, [correctionsCount]);
+
+  useEffect(() => {
+    elapsedTimeRef.current = elapsedTime;
+  }, [elapsedTime]);
+
+  useEffect(() => {
+    isSessionActiveRef.current = isSessionActive;
+  }, [isSessionActive]);
+
+  useEffect(() => {
+    lastFeedbackCountRef.current = lastFeedbackCount;
+  }, [lastFeedbackCount]);
+
+  useEffect(() => {
+    if (!isSessionActive) return;
+    setClockTick(Date.now());
+    const timer = setInterval(() => {
+      setClockTick(Date.now());
+    }, 1000);
+    return () => clearInterval(timer);
+  }, [isSessionActive]);
 
   // Poll feedback every 2 seconds from Python service (reduced frequency for performance)
   useEffect(() => {
     if (!isSessionActive) return;
-    
+
     fetchFeedback(); // Initial fetch
     const intervalId = setInterval(fetchFeedback, 2000); // Increased to 2 seconds to reduce lag
     return () => clearInterval(intervalId);
@@ -296,16 +389,16 @@ const Analysis = () => {
 
   // Separate effect for backend updates every 30 seconds
   useEffect(() => {
-    if (!isSessionActive || !scores || !user?.id) return;
-    
+    if (!isSessionActive || !user?.id) return;
+
     const updateBackend = () => {
-      updateBackendRealtime(scores, correctionsCount);
+      updateBackendRealtime(latestScoresRef.current, latestCorrectionsRef.current);
     };
-    
+
     updateBackend(); // Initial update
     const intervalId = setInterval(updateBackend, 30000); // Every 30 seconds
     return () => clearInterval(intervalId);
-  }, [isSessionActive, scores, correctionsCount, user?.id, updateBackendRealtime]);
+  }, [isSessionActive, user?.id, updateBackendRealtime]);
 
   // Poll overview every 5 seconds from Node.js backend  
   useEffect(() => {
@@ -316,35 +409,29 @@ const Analysis = () => {
     }
   }, [user, token, fetchOverview]);
 
-  // Initialize session start time when session becomes active
+  // Keep session metadata in sync with active/inactive transitions.
   useEffect(() => {
     if (isSessionActive && !sessionStartTime) {
       setSessionStartTime(Date.now());
     } else if (!isSessionActive) {
+      backendSessionIdRef.current = null;
       setSessionStartTime(null);
-      setElapsedTime(0);
     }
   }, [isSessionActive, sessionStartTime]);
 
-  // Single timer for session duration - using consistent Date.now()
+  // Drive elapsed timer from the tracked snapshot clock for smooth increments.
   useEffect(() => {
-    let timer;
-    if (isSessionActive && sessionStartTime) {
-      timer = setInterval(() => {
-        const now = Date.now();
-        const elapsed = Math.floor((now - sessionStartTime) / 1000);
-        setElapsedTime(elapsed);
-        setOverview(prev => ({
-          ...prev,
-          timeTracked: formatTime(elapsed)
-        }));
-      }, 1000);
+    if (isSessionActive) {
+      const currentSeconds = displayedTrackedTime.current_session_time_seconds;
+      setElapsedTime(currentSeconds);
+      setOverview((prev) => ({
+        ...prev,
+        timeTracked: formatTime(currentSeconds),
+      }));
+    } else {
+      setElapsedTime(0);
     }
-    
-    return () => {
-      if (timer) clearInterval(timer);
-    };
-  }, [isSessionActive, sessionStartTime, formatTime]);
+  }, [isSessionActive, displayedTrackedTime.current_session_time_seconds, formatTime]);
 
   // Start animations when components come into view
   useEffect(() => {
@@ -382,6 +469,23 @@ const Analysis = () => {
     
     setIsStoppingAnalysis(true);
     try {
+      // Capture the displayed values *before* any state changes so the
+      // UI freezes on exactly what the user sees right now.
+      const finalSessionSeconds =
+        displayedTrackedTime.current_session_time_seconds;
+      const finalTodaySeconds =
+        displayedTrackedTime.todays_time_tracked_seconds;
+
+      // Freeze the display immediately so no further ticks change it.
+      frozenDisplayRef.current = {
+        todays_time_tracked_seconds: finalTodaySeconds,
+        current_session_time_seconds: finalSessionSeconds,
+      };
+
+      // Mark inactive *immediately* — stops the clockTick interval.
+      setIsSessionActive(false);
+      stoppedByUserRef.current = true;
+
       // Stop the Python posture detection service
       const response = await fetch("http://localhost:5001/stop_analysis", {
         method: 'POST',
@@ -402,7 +506,7 @@ const Analysis = () => {
               'Authorization': `Bearer ${token}`
             },
             body: JSON.stringify({
-              sessionDuration: elapsedTime,
+              sessionDuration: finalSessionSeconds,
               finalScores: scores
             })
           });
@@ -417,8 +521,8 @@ const Analysis = () => {
               },
               body: JSON.stringify({
                 sessionId: result.session_summary.session_id || 'manual-session-' + Date.now(),
-                duration: result.session_summary.duration || elapsedTime,
-                durationMinutes: result.session_summary.duration_minutes || Math.floor(elapsedTime / 60),
+                duration: result.session_summary.duration || finalSessionSeconds,
+                durationMinutes: result.session_summary.duration_minutes || Math.floor(finalSessionSeconds / 60),
                 averageScores: result.session_summary.average_scores || {
                   headTilt: scores.headTilt,
                   shoulderAlignment: scores.shoulderAlignment,
@@ -430,31 +534,50 @@ const Analysis = () => {
                 scoresHistory: [],
                 feedbackHistory: feedback,
                 // Add cumulative time tracking
-                sessionTimeSeconds: elapsedTime,
+                sessionTimeSeconds: finalSessionSeconds,
                 updateCumulativeTime: true
               })
             });
           }
         }
 
-        // Reset session state
-        setIsSessionActive(false);
+        // Fire one final realtime update so the backend persists the
+        // exact final session duration into TrackedTime via $max.
+        // This must happen before clearing backendSessionIdRef.
+        elapsedTimeRef.current = finalSessionSeconds;
+        await updateBackendRealtime(latestScoresRef.current, latestCorrectionsRef.current);
+
+        // Persist the frozen values into trackedTime state so future
+        // backend polls see them as the minimum.
+        backendSessionIdRef.current = null;
         setSessionStartTime(null);
-        setElapsedTime(0);
+        setElapsedTime(finalSessionSeconds);
+        applyTrackedSnapshot(
+          finalTodaySeconds,
+          finalSessionSeconds,
+          { allowTodayRegression: false, allowCurrentRegression: true, forceResync: true }
+        );
         
         // Keep final overview data
         setOverview(prev => ({
           ...prev,
-          timeTracked: formatTime(elapsedTime),
+          timeTracked: formatTime(finalSessionSeconds),
           corrections: correctionsCount
         }));
 
         alert("Analysis stopped and session data saved!");
       } else {
+        // Revert – the stop call failed, re-activate.
+        frozenDisplayRef.current = null;
+        stoppedByUserRef.current = false;
+        setIsSessionActive(true);
         alert("Failed to stop analysis. Please try again.");
       }
     } catch (error) {
       console.error("Error stopping analysis:", error);
+      frozenDisplayRef.current = null;
+      stoppedByUserRef.current = false;
+      setIsSessionActive(true);
       alert("Error stopping analysis. Please check your connection.");
     } finally {
       setIsStoppingAnalysis(false);
@@ -493,10 +616,19 @@ const Analysis = () => {
       });
 
       if (response.ok) {
+        backendSessionIdRef.current = `session_${user?.id || 'user'}_${Date.now()}`;
+        frozenDisplayRef.current = null; // clear any prior frozen snapshot
+        stoppedByUserRef.current = false; // allow backend polls to manage state again
         setIsSessionActive(true);
         setSessionStartTime(Date.now());
+        applyTrackedSnapshot(trackedTime.todays_time_tracked_seconds, 0, {
+          allowTodayRegression: false,
+          allowCurrentRegression: true,
+          forceResync: true,
+        });
         setCorrectionsCount(0);
         setLastFeedbackCount(0);
+        reloadVideoFeed();
         setOverview(prev => ({
           ...prev,
           postureScore: 100,
@@ -519,42 +651,35 @@ const Analysis = () => {
       const response = await fetch("http://localhost:5001/camera_status");
       if (response.ok) {
         const data = await response.json();
-        setIsSessionActive(data.camera_active);
+        if (data.camera_active && !stoppedByUserRef.current) {
+          setIsSessionActive(true);
+        }
         
         // Don't override sessionStartTime if already set - let the timer useEffect handle it
         // Only update elapsed time if we get duration from backend
-        if (data.camera_active && data.session_duration && !sessionStartTime) {
+        if (data.camera_active && !stoppedByUserRef.current && data.session_duration) {
           const seconds = Math.floor(data.session_duration);
-          setElapsedTime(seconds);
-          setOverview(prev => ({
-            ...prev,
-            timeTracked: formatTime(seconds)
-          }));
-        }
-        
-        if (!data.camera_active) {
-          // Reset session timing when camera is not active
-          setSessionStartTime(null);
-          setElapsedTime(0);
-          setOverview(prev => ({
-            ...prev,
-            timeTracked: "0:00:00"
-          }));
+          setSessionStartTime((prev) => prev || Date.now() - seconds * 1000);
+          applyTrackedSnapshot(
+            trackedTime.todays_time_tracked_seconds,
+            seconds,
+            { allowTodayRegression: false, allowCurrentRegression: false }
+          );
         }
       }
     } catch (error) {
       console.error("Error checking camera status:", error);
     }
-  }, [formatTime, sessionStartTime]);
+  }, [applyTrackedSnapshot, trackedTime.todays_time_tracked_seconds]);
 
   // Check camera status periodically
   useEffect(() => {
-    if (user && token) {
+    if (user && token && !isSessionActive) {
       checkCameraStatus();
-      const statusInterval = setInterval(checkCameraStatus, 2000);
+      const statusInterval = setInterval(checkCameraStatus, 5000);
       return () => clearInterval(statusInterval);
     }
-  }, [user, token, checkCameraStatus]);
+  }, [user, token, checkCameraStatus, isSessionActive]);
 
   // Animation variants
   const containerVariants = {
@@ -653,10 +778,17 @@ const Analysis = () => {
                   >
                     <img 
                       ref={videoRef}
-                      src="http://localhost:5001/video_feed"
+                      src={`http://localhost:5001/video_feed?t=${videoFeedNonce}`}
                       alt="Camera feed" 
                       className="w-full h-full object-contain"
-                      onError={() => setCameraError(true)}
+                      onLoad={() => {
+                        setCameraError(false);
+                        setIsLoading(false);
+                      }}
+                      onError={() => {
+                        setCameraError(true);
+                        setIsLoading(false);
+                      }}
                     />
                     {/* Position visualization overlay */}
                     <motion.div 
@@ -744,6 +876,7 @@ const Analysis = () => {
                         animate={{ opacity: 1, y: 0 }}
                         whileHover={{ scale: 1.05 }}
                         whileTap={{ scale: 0.95 }}
+                        onClick={reloadVideoFeed}
                         transition={{ delay: 0.7, duration: 0.5 }}
                         className={`mt-6 bg-[${colors.accent}] text-white px-6 py-2 rounded-lg font-medium flex items-center hover:bg-[#2563eb]`}
                       >
@@ -975,13 +1108,13 @@ const Analysis = () => {
                   <p className={`${colors.textSecondary} text-xs mb-1 flex items-center`}>
                     <Clock className={`h-3 w-3 mr-1 text-[${colors.accent}]`} /> Today's Time Tracked (DB)
                   </p>
-                  <p className={`text-[${colors.accent}] text-xl font-bold`}>{formatTime(Math.floor(trackedTime.todays_time_tracked_seconds))}</p>
+                  <p className={`text-[${colors.accent}] text-xl font-bold`}>{formatTime(Math.floor(displayedTrackedTime.todays_time_tracked_seconds))}</p>
                 </div>
                 <div className="bg-slate-50 p-4 rounded-lg">
                   <p className={`${colors.textSecondary} text-xs mb-1 flex items-center`}>
                     <Clock className={`h-3 w-3 mr-1 text-[${colors.accent}]`} /> Current Session (DB)
                   </p>
-                  <p className={`text-[${colors.accent}] text-xl font-bold`}>{formatTime(Math.floor(trackedTime.current_section_time_seconds))}</p>
+                  <p className={`text-[${colors.accent}] text-xl font-bold`}>{formatTime(Math.floor(displayedTrackedTime.current_session_time_seconds))}</p>
                 </div>
               </div>
             </motion.div>

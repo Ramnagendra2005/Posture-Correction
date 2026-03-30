@@ -58,9 +58,8 @@ Backend/
 │   └── postureService.js     # Core posture monitoring service
 ├── utils/
 │   └── logger.js             # Winston logging configuration
-├── python/
-│   ├── posture_detector.py   # Python posture detection microservice
-│   └── requirements.txt      # Python dependencies
+├── backend.py                # Python posture detection microservice
+├── requirements.txt          # Python dependencies
 └── logs/                     # Application logs
 ```
 
@@ -86,9 +85,7 @@ npm install
 
 3. **Install Python dependencies**
 ```bash
-cd python
 pip install -r requirements.txt
-cd ..
 ```
 
 4. **Environment Setup**
@@ -229,7 +226,7 @@ const socket = io('http://localhost:5000', {
 
 ## 🐍 Python Microservice
 
-The Python service (`python/posture_detector.py`) handles:
+The Python service (`backend.py`) handles:
 - Camera capture and processing
 - MediaPipe pose/face detection
 - Auto-framing with Kalman filtering
@@ -238,8 +235,8 @@ The Python service (`python/posture_detector.py`) handles:
 
 ### Running Python Service Standalone
 ```bash
-cd python
-python posture_detector.py --user-id USER_ID --session-id SESSION_ID
+cd Backend
+python backend.py
 ```
 
 ## 📊 Data Models

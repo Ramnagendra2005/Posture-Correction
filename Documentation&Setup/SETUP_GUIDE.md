@@ -93,7 +93,7 @@ Output: `🚀 Server running on port 3000`
 #### Terminal 3 - Python Posture Service  
 ```bash
 cd Backend
-python posture_detector.py
+python backend.py
 ```
 Output: `Starting Posture Detection Service...`
 

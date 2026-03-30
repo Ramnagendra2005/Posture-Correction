@@ -1,5 +1,0 @@
-# Python dependencies for posture detection microservice
-opencv-python==4.8.1.78
-mediapipe==0.10.3
-numpy==1.24.3
-requests>=2.31.0

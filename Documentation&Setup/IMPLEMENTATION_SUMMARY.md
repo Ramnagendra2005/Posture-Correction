@@ -254,7 +254,6 @@ cd Backend
 npm install
 
 # Python dependencies
-cd python
 pip install -r requirements.txt
 ```
 

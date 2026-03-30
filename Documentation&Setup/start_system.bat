@@ -29,7 +29,7 @@ timeout /t 3 /nobreak >nul
 
 REM Start Python posture service in new window
 echo Starting Python Posture Service (Port 5001)...
-start "Python Posture Service" cmd /k "cd /d %~dp0Backend && python posture_detector.py"
+start "Python Posture Service" cmd /k "cd /d %~dp0Backend && python backend.py"
 
 REM Wait a moment
 timeout /t 3 /nobreak >nul
