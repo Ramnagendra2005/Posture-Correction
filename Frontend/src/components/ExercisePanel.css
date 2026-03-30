@@ -1,0 +1,286 @@
+/* ═══════════════════════════════════════════
+   ExercisePanel – Glassmorphism Card Layout
+   ═══════════════════════════════════════════ */
+
+.exercise-panel {
+  margin: 1.5rem 0;
+  border-radius: 16px;
+  background: rgba(30, 30, 45, 0.7);
+  backdrop-filter: blur(16px);
+  -webkit-backdrop-filter: blur(16px);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  overflow: hidden;
+  box-shadow: 0 4px 24px rgba(0, 0, 0, 0.2);
+}
+
+.exercise-panel--loading {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 0.75rem;
+  padding: 2rem;
+  color: rgba(255, 255, 255, 0.6);
+  font-size: 0.9rem;
+}
+
+.exercise-panel__spinner {
+  width: 20px;
+  height: 20px;
+  border: 2px solid rgba(255, 255, 255, 0.15);
+  border-top-color: #6366f1;
+  border-radius: 50%;
+  animation: ep-spin 0.8s linear infinite;
+}
+
+@keyframes ep-spin {
+  to { transform: rotate(360deg); }
+}
+
+/* ─── Header ─── */
+.exercise-panel__header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 1rem 1.25rem;
+  cursor: pointer;
+  user-select: none;
+  transition: background 0.2s;
+}
+
+.exercise-panel__header:hover {
+  background: rgba(255, 255, 255, 0.03);
+}
+
+.exercise-panel__title {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+}
+
+.exercise-panel__title h3 {
+  margin: 0;
+  font-size: 1rem;
+  font-weight: 600;
+  color: #f0f0f0;
+  letter-spacing: 0.01em;
+}
+
+.exercise-panel__icon {
+  font-size: 1.25rem;
+}
+
+.exercise-panel__safe-badge {
+  font-size: 0.7rem;
+  padding: 2px 8px;
+  border-radius: 20px;
+  background: rgba(34, 197, 94, 0.15);
+  color: #22c55e;
+  border: 1px solid rgba(34, 197, 94, 0.3);
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  font-weight: 600;
+}
+
+.exercise-panel__meta {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+}
+
+.exercise-panel__severity {
+  font-size: 0.75rem;
+  padding: 2px 10px;
+  border-radius: 20px;
+  text-transform: capitalize;
+  font-weight: 500;
+}
+
+.exercise-panel__severity[data-severity="mild"] {
+  background: rgba(34, 197, 94, 0.12);
+  color: #4ade80;
+}
+
+.exercise-panel__severity[data-severity="moderate"] {
+  background: rgba(245, 158, 11, 0.12);
+  color: #fbbf24;
+}
+
+.exercise-panel__severity[data-severity="severe"] {
+  background: rgba(239, 68, 68, 0.12);
+  color: #f87171;
+}
+
+.exercise-panel__toggle {
+  font-size: 0.75rem;
+  color: rgba(255, 255, 255, 0.4);
+}
+
+/* ─── Body ─── */
+.exercise-panel__body {
+  padding: 0 1.25rem 1.25rem;
+}
+
+/* ─── Flaw Chips ─── */
+.exercise-panel__flaws {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.5rem;
+  margin-bottom: 1rem;
+}
+
+.exercise-panel__flaws-label {
+  font-size: 0.8rem;
+  color: rgba(255, 255, 255, 0.5);
+}
+
+.exercise-panel__flaw-chip {
+  font-size: 0.75rem;
+  padding: 3px 10px;
+  border-radius: 16px;
+  background: rgba(99, 102, 241, 0.12);
+  color: #818cf8;
+  border: 1px solid rgba(99, 102, 241, 0.2);
+}
+
+/* ─── Exercise Grid ─── */
+.exercise-panel__grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
+  gap: 0.75rem;
+}
+
+/* ─── Exercise Card ─── */
+.exercise-card {
+  background: rgba(255, 255, 255, 0.04);
+  border: 1px solid rgba(255, 255, 255, 0.06);
+  border-radius: 12px;
+  padding: 1rem;
+  transition: transform 0.2s, border-color 0.2s, box-shadow 0.2s;
+}
+
+.exercise-card:hover {
+  transform: translateY(-2px);
+  border-color: rgba(99, 102, 241, 0.3);
+  box-shadow: 0 4px 16px rgba(99, 102, 241, 0.1);
+}
+
+.exercise-card--completed {
+  opacity: 0.6;
+  border-color: rgba(34, 197, 94, 0.3);
+}
+
+.exercise-card__header {
+  display: flex;
+  align-items: flex-start;
+  gap: 0.75rem;
+  margin-bottom: 0.5rem;
+}
+
+.exercise-card__emoji {
+  font-size: 1.5rem;
+  flex-shrink: 0;
+}
+
+.exercise-card__info {
+  flex: 1;
+  min-width: 0;
+}
+
+.exercise-card__name {
+  margin: 0 0 0.25rem;
+  font-size: 0.9rem;
+  font-weight: 600;
+  color: #f0f0f0;
+}
+
+.exercise-card__tags {
+  display: flex;
+  gap: 0.5rem;
+  font-size: 0.75rem;
+}
+
+.exercise-card__difficulty {
+  font-weight: 500;
+  text-transform: capitalize;
+}
+
+.exercise-card__duration {
+  color: rgba(255, 255, 255, 0.4);
+}
+
+.exercise-card__desc {
+  font-size: 0.8rem;
+  color: rgba(255, 255, 255, 0.6);
+  line-height: 1.5;
+  margin: 0.5rem 0 0.75rem;
+}
+
+.exercise-card__btn {
+  width: 100%;
+  padding: 0.5rem;
+  border: 1px solid rgba(99, 102, 241, 0.3);
+  border-radius: 8px;
+  background: rgba(99, 102, 241, 0.1);
+  color: #818cf8;
+  font-size: 0.8rem;
+  font-weight: 500;
+  cursor: pointer;
+  transition: background 0.2s, border-color 0.2s;
+}
+
+.exercise-card__btn:hover:not(:disabled) {
+  background: rgba(99, 102, 241, 0.2);
+  border-color: rgba(99, 102, 241, 0.5);
+}
+
+.exercise-card__btn:disabled {
+  color: #22c55e;
+  border-color: rgba(34, 197, 94, 0.3);
+  background: rgba(34, 197, 94, 0.08);
+  cursor: default;
+}
+
+/* ─── Empty State ─── */
+.exercise-panel__empty {
+  text-align: center;
+  padding: 2rem;
+  color: rgba(255, 255, 255, 0.5);
+}
+
+.exercise-panel__empty span {
+  font-size: 2rem;
+  display: block;
+  margin-bottom: 0.5rem;
+}
+
+.exercise-panel__empty p {
+  margin: 0;
+  font-size: 0.9rem;
+}
+
+/* ─── Refresh Button ─── */
+.exercise-panel__refresh {
+  display: block;
+  margin: 1rem auto 0;
+  padding: 0.5rem 1.25rem;
+  border: none;
+  border-radius: 8px;
+  background: rgba(255, 255, 255, 0.05);
+  color: rgba(255, 255, 255, 0.5);
+  font-size: 0.8rem;
+  cursor: pointer;
+  transition: background 0.2s, color 0.2s;
+}
+
+.exercise-panel__refresh:hover {
+  background: rgba(255, 255, 255, 0.1);
+  color: rgba(255, 255, 255, 0.8);
+}
+
+/* ─── Responsive ─── */
+@media (max-width: 600px) {
+  .exercise-panel__grid {
+    grid-template-columns: 1fr;
+  }
+}
