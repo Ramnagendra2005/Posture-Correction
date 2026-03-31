@@ -265,8 +265,8 @@ if (process.env.ENABLE_DAILY_EMAILS === "true") {
 
       for (const user of users) {
         try {
-          const { to, subject, html } = await buildDailyEmail(user._id, today);
-          const info = await sendMail({ to, subject, html });
+          const { to, subject, html, text } = await buildDailyEmail(user._id, today);
+          const info = await sendMail({ to, subject, html, text });
           if (info?.skipped) {
             logger.warn(`Email skipped for ${to} (SMTP not configured)`);
             break; // Don't loop needlessly if SMTP isn't configured

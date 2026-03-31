@@ -134,9 +134,9 @@ const normalizeMinutes = (value) => {
 // Send today's daily email to the authenticated user
 router.post("/send-daily-email", async (req, res) => {
   try {
-    const { to, subject, html } = await buildDailyEmail(req.userId, new Date());
+    const { to, subject, html, text } = await buildDailyEmail(req.userId, new Date());
 
-    const info = await sendMail({ to, subject, html });
+    const info = await sendMail({ to, subject, html, text });
     if (info?.skipped) {
       return res.status(202).json({
         success: false,

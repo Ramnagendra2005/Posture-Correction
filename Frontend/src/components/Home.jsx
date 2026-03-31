@@ -1,14 +1,57 @@
-import React, { useEffect } from "react";
+import React, { useEffect, useMemo, useState } from "react";
 import { motion, useAnimation } from "framer-motion";
 import { useInView } from "react-intersection-observer";
 import { ChevronDown, Monitor, Activity, Users, Award, ArrowRight } from "lucide-react";
 import { useNavigate } from "react-router-dom";
+import useAuth from "../hooks/useAuth";
+import screenImage from "../assets/screen.png";
+
+const API_BASE = import.meta.env.VITE_API_BASE_URL || "http://localhost:3001";
 
 const ACCENT = "#3b82f6";
 const BG_LIGHT = "#ffffff";
 const BG_LIGHTER = "#f8fafc";
 const TEXT_DARK = "#1e293b";
 const TEXT_FADED = "#64748b";
+
+const normalizeScore = (value) => {
+  const n = Number(value);
+  if (!Number.isFinite(n)) return 0;
+  return Math.max(0, Math.min(100, Math.round(n)));
+};
+
+const toTenScale = (value) => {
+  const safe = normalizeScore(value);
+  return Math.max(0, Math.min(10, Math.round(safe / 10)));
+};
+
+const getOverallColor = (score) => {
+  if (score >= 85) return "#10b981";
+  if (score >= 70) return "#f59e0b";
+  return "#ef4444";
+};
+
+const getScoreChipStyle = (score) => {
+  if (score >= 8) {
+    return {
+      background: "#dcfce7",
+      border: "#86efac",
+      text: "#14532d",
+    };
+  }
+  if (score >= 6) {
+    return {
+      background: "#fef9c3",
+      border: "#fde68a",
+      text: "#713f12",
+    };
+  }
+  return {
+    background: "#fee2e2",
+    border: "#fca5a5",
+    text: "#7f1d1d",
+  };
+};
 
 const Home = () => {
   return (
@@ -23,102 +66,690 @@ const Home = () => {
   );
 };
 
+const FloatingParticle = ({ delay, x, y, size }) => (
+  <motion.div
+    className="absolute rounded-full"
+    style={{
+      width: size,
+      height: size,
+      left: x,
+      top: y,
+      background: `radial-gradient(circle, ${ACCENT}25, ${ACCENT}08)`,
+      filter: "blur(1px)",
+    }}
+    animate={{
+      y: [0, -20, 0],
+      opacity: [0.3, 0.7, 0.3],
+      scale: [1, 1.2, 1],
+    }}
+    transition={{
+      duration: 4 + Math.random() * 2,
+      delay,
+      repeat: Infinity,
+      ease: "easeInOut",
+    }}
+  />
+);
+
 const HeroSection = () => {
   const navigate = useNavigate();
+  const { token } = useAuth();
+  const [heroImageSrc, setHeroImageSrc] = useState(screenImage);
+  const [heroData, setHeroData] = useState({
+    todaySessions: 0,
+    overall: 0,
+    headTilt: 0,
+    neckAngle: 0,
+    spine: 0,
+    shoulder: 0,
+  });
+
+  useEffect(() => {
+    let disposed = false;
+
+    const image = new Image();
+    image.src = screenImage;
+
+    image.onload = () => {
+      if (disposed) return;
+
+      const canvas = document.createElement("canvas");
+      canvas.width = image.naturalWidth || image.width;
+      canvas.height = image.naturalHeight || image.height;
+
+      const context = canvas.getContext("2d", { willReadFrequently: true });
+      if (!context) return;
+
+      context.drawImage(image, 0, 0);
+      const frame = context.getImageData(0, 0, canvas.width, canvas.height);
+      const pixels = frame.data;
+      const keyColor = { r: 142, g: 119, b: 178 };
+
+      for (let i = 0; i < pixels.length; i += 4) {
+        const r = pixels[i];
+        const g = pixels[i + 1];
+        const b = pixels[i + 2];
+
+        const distance = Math.sqrt(
+          (r - keyColor.r) * (r - keyColor.r) +
+            (g - keyColor.g) * (g - keyColor.g) +
+            (b - keyColor.b) * (b - keyColor.b)
+        );
+        const isPurpleFamily = b > r && r > g;
+
+        if (!isPurpleFamily) continue;
+
+        if (distance < 58) {
+          pixels[i + 3] = 0;
+        } else if (distance < 90) {
+          const alphaRatio = (distance - 58) / 32;
+          pixels[i + 3] = Math.round(pixels[i + 3] * alphaRatio);
+        }
+      }
+
+      context.putImageData(frame, 0, 0);
+      setHeroImageSrc(canvas.toDataURL("image/png"));
+    };
+
+    return () => {
+      disposed = true;
+    };
+  }, []);
+
+  useEffect(() => {
+    if (!token) return;
+
+    let isMounted = true;
+
+    const fetchHeroData = async () => {
+      try {
+        const response = await fetch(`${API_BASE}/api/reports/analytics`, {
+          headers: {
+            Authorization: `Bearer ${token}`,
+          },
+        });
+
+        if (!response.ok) return;
+
+        const payload = await response.json();
+        const summary = payload?.summary || {};
+
+        if (!isMounted) return;
+
+        const headTilt = normalizeScore(summary.headTiltScore ?? summary.neckScore);
+        const shoulder = normalizeScore(summary.shoulderAlignmentScore ?? summary.shoulderScore);
+        const spine = normalizeScore(summary.spinalPostureScore ?? summary.backScore);
+
+        setHeroData({
+          todaySessions: Math.max(0, Number(summary.todaySessions || 0)),
+          overall: normalizeScore(summary.currentScore ?? summary.todayAvgScore ?? 0),
+          headTilt,
+          neckAngle: headTilt,
+          spine,
+          shoulder,
+        });
+      } catch (error) {
+        // Keep hero in empty state if analytics are unavailable.
+      }
+    };
+
+    fetchHeroData();
+    return () => {
+      isMounted = false;
+    };
+  }, [token]);
+
+  const hasAnalyzedToday = heroData.todaySessions > 0;
+
+  const callouts = useMemo(
+    () => [
+      {
+        id: "head-tilt",
+        label: "Head Tilt",
+        value: toTenScale(heroData.headTilt),
+        anchorX: 46,
+        anchorY: 23,
+        rowY: 34,
+        color: "#f43f5e",
+      },
+      {
+        id: "neck-angle",
+        label: "Neck Angle",
+        value: toTenScale(heroData.neckAngle),
+        anchorX: 55,
+        anchorY: 29,
+        rowY: 45,
+        color: "#f59e0b",
+      },
+      {
+        id: "spine",
+        label: "Spine",
+        value: toTenScale(heroData.spine),
+        anchorX: 73,
+        anchorY: 46,
+        rowY: 56,
+        color: "#10b981",
+      },
+      {
+        id: "shoulder",
+        label: "Shoulder",
+        value: toTenScale(heroData.shoulder),
+        anchorX: 60,
+        anchorY: 38,
+        rowY: 67,
+        color: "#3b82f6",
+      },
+    ],
+    [heroData.headTilt, heroData.neckAngle, heroData.shoulder, heroData.spine]
+  );
+
+  const overallProgress = normalizeScore(heroData.overall);
+  const circumference = 2 * Math.PI * 41;
+  const dashOffset = circumference - (overallProgress / 100) * circumference;
+  const overallColor = getOverallColor(overallProgress);
+
+  /* Floating particles for ambient background effect */
+  const particles = useMemo(
+    () =>
+      Array.from({ length: 8 }, (_, i) => ({
+        delay: i * 0.6,
+        x: `${10 + Math.random() * 80}%`,
+        y: `${10 + Math.random() * 80}%`,
+        size: 6 + Math.random() * 14,
+      })),
+    []
+  );
 
   return (
     <section
-      className="relative flex items-center min-h-screen px-6"
+      className="relative flex items-center min-h-screen overflow-hidden"
       style={{
-        background: `linear-gradient(135deg, ${BG_LIGHT} 0%, ${BG_LIGHTER} 100%)`,
+        background: `linear-gradient(135deg, ${BG_LIGHT} 0%, #eef2ff 50%, ${BG_LIGHTER} 100%)`,
       }}
     >
-      <div className="max-w-6xl mx-auto grid grid-cols-1 md:grid-cols-2 gap-12 items-center">
-        <motion.div
-          initial={{ opacity: 0, x: -20 }}
-          animate={{ opacity: 1, x: 0 }}
-          transition={{ duration: 0.8 }}
-          className="text-left"
+      {/* Decorative background elements */}
+      <div
+        className="absolute pointer-events-none"
+        style={{
+          width: "600px",
+          height: "600px",
+          top: "-200px",
+          right: "-200px",
+          background: `radial-gradient(circle, ${ACCENT}08, transparent 70%)`,
+          borderRadius: "50%",
+        }}
+      />
+      <div
+        className="absolute pointer-events-none"
+        style={{
+          width: "400px",
+          height: "400px",
+          bottom: "-100px",
+          left: "-100px",
+          background: `radial-gradient(circle, #818cf808, transparent 70%)`,
+          borderRadius: "50%",
+        }}
+      />
+
+      {/* Floating ambient particles */}
+      {particles.map((p, i) => (
+        <FloatingParticle key={i} {...p} />
+      ))}
+
+      <div className="w-full max-w-7xl mx-auto px-6 lg:px-8">
+        <div
+          className="grid items-center gap-6 lg:gap-4"
+          style={{
+            gridTemplateColumns: "1fr",
+          }}
         >
-          <motion.h1
-            initial={{ opacity: 0, y: -20 }}
-            animate={{ opacity: 1, y: 0 }}
-            transition={{ duration: 0.8 }}
-            className="text-4xl md:text-6xl font-extrabold"
-            style={{ color: ACCENT, letterSpacing: "2px" }}
-          >
-            Smart <span style={{ color: "#2563eb" }}>Posture</span>
-          </motion.h1>
-
-          <motion.h2
-            initial={{ opacity: 0 }}
-            animate={{ opacity: 1 }}
-            transition={{ delay: 0.5, duration: 1 }}
-            className="text-2xl md:text-3xl font-semibold mt-6 mb-8 max-w-xl"
-            style={{
-              color: TEXT_DARK,
-              fontWeight: 700,
-            }}
-          >
-            A Real-Time <span style={{ color: ACCENT }}>ML-Driven System</span> for Posture Detection,{" "}
-            <span style={{ color: ACCENT }}>Analysis</span> and Personalized Exercise Recommendations
-          </motion.h2>
-
-          <motion.p
-            initial={{ opacity: 0 }}
-            animate={{ opacity: 1 }}
-            transition={{ delay: 0.7, duration: 0.8 }}
-            className="text-lg max-w-md"
-            style={{ color: TEXT_FADED }}
-          >
-            Improve your posture, <span style={{ color: ACCENT }}>reduce pain</span>,
-            and boost productivity with our <span style={{ color: ACCENT }}>AI-powered</span> posture analysis system.
-          </motion.p>
-
-          <motion.div
-            initial={{ opacity: 0, scale: 0.8 }}
-            animate={{ opacity: 1, scale: 1 }}
-            transition={{ delay: 1, duration: 0.6 }}
-          >
-            <button
-              onClick={() => navigate("/analysis")}
-              className="px-8 py-4 rounded-lg font-bold text-lg transition-transform duration-300"
-              style={{
-                backgroundColor: ACCENT,
-                marginTop: "2rem",
-                color: "white",
-              }}
-              onMouseEnter={e => (e.currentTarget.style.backgroundColor = "#2563eb")}
-              onMouseLeave={e => (e.currentTarget.style.backgroundColor = ACCENT)}
+          {/* ─── MOBILE: stacked layout ─── */}
+          {/* ─── DESKTOP: 3-column layout ─── */}
+          <div className="hidden md:grid items-center" style={{ gridTemplateColumns: "1fr minmax(0, 520px) 200px", gap: "2rem" }}>
+            {/* Left – Text Content */}
+            <motion.div
+              initial={{ opacity: 0, x: -30 }}
+              animate={{ opacity: 1, x: 0 }}
+              transition={{ duration: 0.8 }}
+              className="text-left"
             >
-              Start Your Analysis
-            </button>
-          </motion.div>
-        </motion.div>
 
-        <motion.div
-          initial={{ opacity: 0, x: 20 }}
-          animate={{ opacity: 1, x: 0 }}
-          transition={{ duration: 0.8, delay: 0.3 }}
-          className="flex justify-center"
-        >
-          <img
-            src="https://imgs.search.brave.com/SmkmUJBZJCYgDoYXy5uf-XiiKp18MHIvexlHlkdAiMk/rs:fit:860:0:0:0/g:ce/aHR0cHM6Ly9jZG4t/cHJvZC5tZWRpY2Fs/bmV3c3RvZGF5LmNv/bS9jb250ZW50L2lt/YWdlcy9hcnRpY2xl/cy8zMjEvMzIxODYz/L2NvcnJlY3Qtc2l0/dGluZy1wb3N0dXJl/LWRpYWdyYW0tYXQt/YS1jb21wdXRlci1k/ZXNrLmpwZw"
-            alt="Correct sitting posture"
-            className="rounded-lg max-w-full max-h-96 object-contain"
-          />
-        </motion.div>
 
-        <motion.div
-          initial={{ opacity: 0 }}
-          animate={{ opacity: 0.8 }}
-          transition={{ delay: 2, duration: 1, repeat: Infinity, repeatType: "reverse" }}
-          className="absolute bottom-10 left-1/2 transform -translate-x-1/2"
-          style={{ color: ACCENT }}
-        >
-          <ChevronDown size={36} />
-        </motion.div>
+              <motion.h1
+                initial={{ opacity: 0, y: -20 }}
+                animate={{ opacity: 1, y: 0 }}
+                transition={{ duration: 0.8, delay: 0.1 }}
+                className="font-extrabold"
+                style={{
+                  color: ACCENT,
+                  letterSpacing: "1.5px",
+                  fontSize: "clamp(2.8rem, 4vw, 4rem)",
+                  lineHeight: 1.1,
+                }}
+              >
+                Smart{" "}
+                <span
+                  style={{
+                    backgroundImage: "linear-gradient(135deg, #2563eb, #7c3aed)",
+                    WebkitBackgroundClip: "text",
+                    color: "transparent",
+                  }}
+                >
+                  Posture
+                </span>
+              </motion.h1>
+
+              <motion.h2
+                initial={{ opacity: 0 }}
+                animate={{ opacity: 1 }}
+                transition={{ delay: 0.4, duration: 0.8 }}
+                className="font-semibold mt-5 mb-6"
+                style={{
+                  color: TEXT_DARK,
+                  fontWeight: 700,
+                  fontSize: "clamp(1.25rem, 1.8vw, 1.75rem)",
+                  lineHeight: 1.45,
+                  maxWidth: "540px",
+                }}
+              >
+                A Real-Time <span style={{ color: ACCENT }}>ML-Driven System</span> for Posture Detection,{" "}
+                <span style={{ color: ACCENT }}>Analysis</span> and Personalized Exercise Recommendations
+              </motion.h2>
+
+              <motion.p
+                initial={{ opacity: 0 }}
+                animate={{ opacity: 1 }}
+                transition={{ delay: 0.6, duration: 0.8 }}
+                style={{
+                  color: TEXT_FADED,
+                  fontSize: "1.05rem",
+                  lineHeight: 1.7,
+                  maxWidth: "440px",
+                }}
+              >
+                Improve your posture, <span style={{ color: ACCENT, fontWeight: 500 }}>reduce pain</span>,
+                and boost productivity with our <span style={{ color: ACCENT, fontWeight: 500 }}>AI-powered</span> posture
+                analysis system.
+              </motion.p>
+
+              <motion.div
+                initial={{ opacity: 0, y: 20 }}
+                animate={{ opacity: 1, y: 0 }}
+                transition={{ delay: 0.8, duration: 0.6 }}
+                className="flex items-center gap-4 mt-8"
+              >
+                <button
+                  onClick={() => navigate("/analysis")}
+                  className="font-bold transition-all duration-300"
+                  style={{
+                    backgroundColor: ACCENT,
+                    color: "white",
+                    padding: "14px 32px",
+                    borderRadius: "12px",
+                    fontSize: "1.05rem",
+                    boxShadow: `0 4px 14px ${ACCENT}40`,
+                    border: "none",
+                    cursor: "pointer",
+                  }}
+                  onMouseEnter={(e) => {
+                    e.currentTarget.style.backgroundColor = "#2563eb";
+                    e.currentTarget.style.transform = "translateY(-2px)";
+                    e.currentTarget.style.boxShadow = `0 6px 20px ${ACCENT}50`;
+                  }}
+                  onMouseLeave={(e) => {
+                    e.currentTarget.style.backgroundColor = ACCENT;
+                    e.currentTarget.style.transform = "translateY(0)";
+                    e.currentTarget.style.boxShadow = `0 4px 14px ${ACCENT}40`;
+                  }}
+                >
+                  Start Your Analysis
+                </button>
+                <motion.div
+                  animate={{ x: [0, 6, 0] }}
+                  transition={{ duration: 1.5, repeat: Infinity, ease: "easeInOut" }}
+                >
+                  <ArrowRight size={22} color={ACCENT} />
+                </motion.div>
+              </motion.div>
+            </motion.div>
+
+            {/* Center – Image with SVG overlay & score badge */}
+            <motion.div
+              initial={{ opacity: 0, y: 30 }}
+              animate={{ opacity: 1, y: 0 }}
+              transition={{ duration: 0.8, delay: 0.3 }}
+              className="flex justify-center"
+            >
+              <div className="relative w-full">
+                <div
+                  className="rounded-2xl overflow-hidden bg-white/80"
+                  style={{
+                    border: "1px solid #dbeafe",
+                    boxShadow: "0 8px 32px rgba(59,130,246,0.10), 0 2px 8px rgba(0,0,0,0.04)",
+                  }}
+                >
+                  <img
+                    src={heroImageSrc}
+                    alt="Posture analysis preview"
+                    className="w-full h-auto object-contain"
+                  />
+                </div>
+
+                {/* SVG callout lines */}
+                <svg
+                  viewBox="0 0 100 100"
+                  className="absolute inset-0 w-full h-full pointer-events-none"
+                  preserveAspectRatio="xMidYMid meet"
+                  style={{ overflow: "visible" }}
+                >
+                  {callouts.map((item, index) => (
+                    <motion.path
+                      key={`${item.id}-path`}
+                      d={`M${item.anchorX} ${item.anchorY} C ${item.anchorX + 10} ${item.anchorY + 2}, 84 ${item.rowY}, 99 ${item.rowY}`}
+                      fill="none"
+                      stroke={item.color}
+                      strokeWidth="0.8"
+                      strokeDasharray="none"
+                      initial={{ pathLength: 0, opacity: 0 }}
+                      animate={hasAnalyzedToday ? { pathLength: 1, opacity: 1 } : { pathLength: 0, opacity: 0 }}
+                      transition={{ duration: 0.8, delay: 0.1 + index * 0.12, ease: "easeOut" }}
+                    />
+                  ))}
+
+                  {callouts.map((item, index) => (
+                    <motion.circle
+                      key={`${item.id}-dot`}
+                      cx={item.anchorX}
+                      cy={item.anchorY}
+                      r="1.2"
+                      fill={item.color}
+                      initial={{ opacity: 0, scale: 0.5 }}
+                      animate={hasAnalyzedToday ? { opacity: 1, scale: 1 } : { opacity: 0, scale: 0.5 }}
+                      transition={{ duration: 0.3, delay: 0.35 + index * 0.1 }}
+                    />
+                  ))}
+                </svg>
+
+                {/* Overall score badge */}
+                <motion.div
+                  className="absolute"
+                  style={{ right: "4%", top: "4%" }}
+                  initial={{ opacity: 0, scale: 0.7 }}
+                  animate={hasAnalyzedToday ? { opacity: 1, scale: 1 } : { opacity: 0, scale: 0.7 }}
+                  transition={{ duration: 0.45, delay: 0.95 }}
+                >
+                  <svg width="80" height="80" viewBox="0 0 108 108" role="img" aria-label="Overall posture score">
+                    <circle cx="54" cy="54" r="41" fill="none" stroke="rgba(226,232,240,0.95)" strokeWidth="7" />
+                    <circle
+                      cx="54"
+                      cy="54"
+                      r="41"
+                      fill="none"
+                      stroke={overallColor}
+                      strokeWidth="7"
+                      strokeLinecap="round"
+                      strokeDasharray={circumference}
+                      strokeDashoffset={dashOffset}
+                      transform="rotate(-90 54 54)"
+                    />
+                    <text x="54" y="50" textAnchor="middle" style={{ fill: "#0f172a", fontWeight: 800, fontSize: "30px" }}>
+                      {overallProgress}
+                    </text>
+                    <text x="54" y="70" textAnchor="middle" style={{ fill: "#0f172a", fontWeight: 600, fontSize: "14px" }}>
+                      / 100
+                    </text>
+                  </svg>
+                </motion.div>
+
+                {/* Overlay for when no session is analyzed yet */}
+                <motion.div
+                  className="absolute inset-0 flex items-center justify-center px-6 rounded-2xl"
+                  style={{
+                    background: "linear-gradient(135deg, rgba(255,255,255,0.92), rgba(239,246,255,0.92))",
+                    backdropFilter: "blur(6px)",
+                  }}
+                  animate={{
+                    opacity: hasAnalyzedToday ? 0 : 1,
+                    pointerEvents: hasAnalyzedToday ? "none" : "auto",
+                  }}
+                  transition={{ duration: 0.4 }}
+                >
+                  <div className="text-center max-w-sm">
+                    <motion.div
+                      animate={{ y: [0, -5, 0] }}
+                      transition={{ duration: 2, repeat: Infinity, ease: "easeInOut" }}
+                      style={{ fontSize: "2.5rem", marginBottom: "0.75rem" }}
+                    >
+                      🎯
+                    </motion.div>
+                    <div className="font-bold" style={{ color: "#1e40af", fontSize: "1.15rem" }}>
+                      Start Analysis To Reveal Your Live Posture Map
+                    </div>
+                    <p className="mt-2" style={{ color: "#475569", fontSize: "0.9rem", lineHeight: 1.6 }}>
+                      Your arrows and scores animate in automatically after your first completed session.
+                    </p>
+                  </div>
+                </motion.div>
+              </div>
+            </motion.div>
+
+            {/* Right – Score Callout Cards */}
+            <motion.div
+              initial={{ opacity: 0, x: 20 }}
+              animate={{ opacity: 1, x: 0 }}
+              transition={{ duration: 0.8, delay: 0.5 }}
+              className="flex flex-col gap-3"
+            >
+              {callouts.map((item, index) => {
+                const chipStyle = getScoreChipStyle(item.value);
+                return (
+                  <motion.div
+                    key={`${item.id}-card`}
+                    initial={{ opacity: 0, x: 20, scale: 0.95 }}
+                    animate={
+                      hasAnalyzedToday
+                        ? { opacity: 1, x: 0, scale: 1 }
+                        : { opacity: 0.35, x: 0, scale: 1 }
+                    }
+                    transition={{ duration: 0.5, delay: 0.6 + index * 0.12, ease: "easeOut" }}
+                    whileHover={{ scale: 1.04, boxShadow: `0 4px 16px ${ACCENT}20` }}
+                    style={{
+                      display: "flex",
+                      alignItems: "center",
+                      justifyContent: "space-between",
+                      gap: "10px",
+                      padding: "12px 16px",
+                      borderRadius: "12px",
+                      border: "1px solid #e2e8f0",
+                      backgroundColor: "rgba(255,255,255,0.95)",
+                      boxShadow: "0 2px 8px rgba(0,0,0,0.04)",
+                      cursor: "default",
+                      transition: "box-shadow 0.2s, transform 0.2s",
+                    }}
+                  >
+                    <span
+                      style={{
+                        fontSize: "0.95rem",
+                        fontWeight: 600,
+                        color: "#1e293b",
+                        whiteSpace: "nowrap",
+                      }}
+                    >
+                      {item.label}
+                    </span>
+                    <span
+                      style={{
+                        fontSize: "0.8rem",
+                        fontWeight: 800,
+                        borderRadius: "9999px",
+                        padding: "4px 12px",
+                        border: `1px solid ${chipStyle.border}`,
+                        backgroundColor: chipStyle.background,
+                        color: chipStyle.text,
+                        whiteSpace: "nowrap",
+                      }}
+                    >
+                      {item.value}/10
+                    </span>
+                  </motion.div>
+                );
+              })}
+            </motion.div>
+          </div>
+
+          {/* ─── MOBILE only layout ─── */}
+          <div className="md:hidden flex flex-col gap-8">
+            {/* Text Content */}
+            <motion.div
+              initial={{ opacity: 0, y: 20 }}
+              animate={{ opacity: 1, y: 0 }}
+              transition={{ duration: 0.8 }}
+              className="text-left pt-8"
+            >
+
+
+
+              <h1
+                className="text-3xl font-extrabold"
+                style={{ color: ACCENT, letterSpacing: "1px", lineHeight: 1.15 }}
+              >
+                Smart{" "}
+                <span
+                  style={{
+                    backgroundImage: "linear-gradient(135deg, #2563eb, #7c3aed)",
+                    WebkitBackgroundClip: "text",
+                    color: "transparent",
+                  }}
+                >
+                  Posture
+                </span>
+              </h1>
+
+              <h2
+                className="font-semibold mt-4 mb-5"
+                style={{ color: TEXT_DARK, fontWeight: 700, fontSize: "1.15rem", lineHeight: 1.5 }}
+              >
+                A Real-Time <span style={{ color: ACCENT }}>ML-Driven System</span> for Posture Detection,{" "}
+                <span style={{ color: ACCENT }}>Analysis</span> and Personalized Exercise Recommendations
+              </h2>
+
+              <p style={{ color: TEXT_FADED, fontSize: "0.95rem", lineHeight: 1.65, maxWidth: "400px" }}>
+                Improve your posture, <span style={{ color: ACCENT, fontWeight: 500 }}>reduce pain</span>,
+                and boost productivity with our <span style={{ color: ACCENT, fontWeight: 500 }}>AI-powered</span> posture
+                analysis system.
+              </p>
+
+              <button
+                onClick={() => navigate("/analysis")}
+                className="font-bold mt-6"
+                style={{
+                  backgroundColor: ACCENT,
+                  color: "white",
+                  padding: "12px 28px",
+                  borderRadius: "12px",
+                  fontSize: "1rem",
+                  boxShadow: `0 4px 14px ${ACCENT}40`,
+                  border: "none",
+                  cursor: "pointer",
+                }}
+              >
+                Start Your Analysis
+              </button>
+            </motion.div>
+
+            {/* Image */}
+            <motion.div
+              initial={{ opacity: 0, y: 20 }}
+              animate={{ opacity: 1, y: 0 }}
+              transition={{ duration: 0.8, delay: 0.3 }}
+            >
+              <div
+                className="relative rounded-2xl overflow-hidden"
+                style={{
+                  border: "1px solid #dbeafe",
+                  boxShadow: "0 8px 32px rgba(59,130,246,0.10)",
+                }}
+              >
+                <img src={heroImageSrc} alt="Posture analysis preview" className="w-full h-auto object-contain" />
+
+                <motion.div
+                  className="absolute inset-0 flex items-center justify-center px-6 rounded-2xl"
+                  style={{
+                    background: "linear-gradient(135deg, rgba(255,255,255,0.92), rgba(239,246,255,0.92))",
+                    backdropFilter: "blur(6px)",
+                  }}
+                  animate={{
+                    opacity: hasAnalyzedToday ? 0 : 1,
+                    pointerEvents: hasAnalyzedToday ? "none" : "auto",
+                  }}
+                  transition={{ duration: 0.4 }}
+                >
+                  <div className="text-center">
+                    <div style={{ fontSize: "2rem", marginBottom: "0.5rem" }}>🎯</div>
+                    <div className="font-bold" style={{ color: "#1e40af", fontSize: "1rem" }}>
+                      Start Analysis To Reveal Your Posture Map
+                    </div>
+                    <p className="mt-1" style={{ color: "#475569", fontSize: "0.85rem" }}>
+                      Scores appear after your first session.
+                    </p>
+                  </div>
+                </motion.div>
+              </div>
+            </motion.div>
+
+            {/* Score cards – mobile grid */}
+            <div className="grid grid-cols-2 gap-3">
+              {callouts.map((item, index) => {
+                const chipStyle = getScoreChipStyle(item.value);
+                return (
+                  <motion.div
+                    key={`${item.id}-mobile`}
+                    initial={{ opacity: 0, y: 10 }}
+                    animate={hasAnalyzedToday ? { opacity: 1, y: 0 } : { opacity: 0.35, y: 0 }}
+                    transition={{ duration: 0.4, delay: 0.4 + index * 0.1 }}
+                    style={{
+                      display: "flex",
+                      alignItems: "center",
+                      justifyContent: "space-between",
+                      padding: "10px 14px",
+                      borderRadius: "12px",
+                      border: "1px solid #e2e8f0",
+                      backgroundColor: "rgba(255,255,255,0.95)",
+                      boxShadow: "0 2px 8px rgba(0,0,0,0.04)",
+                    }}
+                  >
+                    <span style={{ fontSize: "0.82rem", fontWeight: 600, color: "#1e293b" }}>{item.label}</span>
+                    <span
+                      style={{
+                        fontSize: "0.72rem",
+                        fontWeight: 800,
+                        borderRadius: "9999px",
+                        padding: "2px 8px",
+                        border: `1px solid ${chipStyle.border}`,
+                        backgroundColor: chipStyle.background,
+                        color: chipStyle.text,
+                      }}
+                    >
+                      {item.value}/10
+                    </span>
+                  </motion.div>
+                );
+              })}
+            </div>
+          </div>
+        </div>
       </div>
+
+      {/* Scroll indicator */}
+      <motion.div
+        initial={{ opacity: 0 }}
+        animate={{ opacity: 0.7 }}
+        transition={{ delay: 2, duration: 1, repeat: Infinity, repeatType: "reverse" }}
+        className="absolute bottom-8 left-1/2 transform -translate-x-1/2"
+        style={{ color: ACCENT }}
+      >
+        <ChevronDown size={32} />
+      </motion.div>
     </section>
   );
 };
