@@ -41,6 +41,20 @@ const formatSecondsAsHms = (seconds) => {
     .padStart(2, "0")}`;
 };
 
+const extractSessionScore = (session, key) => {
+  const candidates = [
+    session?.scores?.[key],
+    session?.[key],
+  ];
+  for (const candidate of candidates) {
+    const n = Number(candidate);
+    if (Number.isFinite(n)) {
+      return Math.max(0, Math.min(100, n));
+    }
+  }
+  return 0;
+};
+
 /**
  * @route   POST /api/posture/track
  * @desc    Receive posture data from Flask backend
@@ -145,9 +159,45 @@ router.post(
         userId: user._id,
         "deviceInfo.sessionId": session_id,
       });
+      const isNewSession = !session;
       const previousSessionDurationMinutes = session
         ? Math.max(0, Number(session.duration) || 0)
         : 0;
+      const previousCorrectionState = {
+        headTilt: Math.max(0, Number(session?.postureMetrics?.headTiltCount || 0)),
+        shoulder: Math.max(0, Number(session?.postureMetrics?.shoulderBendingCount || 0)),
+        back: Math.max(0, Number(session?.postureMetrics?.backBendingCount || 0)),
+        proximity: Math.max(0, Number(session?.postureMetrics?.proximityWarnings || 0)),
+        total: Math.max(0, Number(session?.postureMetrics?.totalCorrections || 0)),
+      };
+
+      const nextCorrectionState = {
+        headTilt: Math.max(0, Number(correction_breakdown.head_tilt || 0)),
+        shoulder: Math.max(0, Number(correction_breakdown.shoulder_bend || 0)),
+        back: Math.max(0, Number(correction_breakdown.back_bend || 0)),
+        proximity: Math.max(0, Number(correction_breakdown.too_close || 0)),
+        total: Math.max(0, Number(total_corrections || 0)),
+      };
+
+      const correctionIncrement =
+        isNewSession
+          ? nextCorrectionState.total
+          : Math.max(0, nextCorrectionState.total - previousCorrectionState.total);
+
+      const correctionBreakdownIncrement = {
+        headTilt: isNewSession
+          ? nextCorrectionState.headTilt
+          : Math.max(0, nextCorrectionState.headTilt - previousCorrectionState.headTilt),
+        shoulder: isNewSession
+          ? nextCorrectionState.shoulder
+          : Math.max(0, nextCorrectionState.shoulder - previousCorrectionState.shoulder),
+        back: isNewSession
+          ? nextCorrectionState.back
+          : Math.max(0, nextCorrectionState.back - previousCorrectionState.back),
+        proximity: isNewSession
+          ? nextCorrectionState.proximity
+          : Math.max(0, nextCorrectionState.proximity - previousCorrectionState.proximity),
+      };
 
       if (!session) {
         // Create new session
@@ -173,11 +223,11 @@ router.post(
       };
 
       session.postureMetrics = {
-        headTiltCount: correction_breakdown.head_tilt || 0,
-        shoulderBendingCount: correction_breakdown.shoulder_bend || 0,
-        backBendingCount: correction_breakdown.back_bend || 0,
-        proximityWarnings: correction_breakdown.too_close || 0,
-        totalCorrections: total_corrections,
+        headTiltCount: nextCorrectionState.headTilt,
+        shoulderBendingCount: nextCorrectionState.shoulder,
+        backBendingCount: nextCorrectionState.back,
+        proximityWarnings: nextCorrectionState.proximity,
+        totalCorrections: nextCorrectionState.total,
       };
 
       // Add timestamp to track when data was received
@@ -214,11 +264,11 @@ router.post(
             overall: overall_score,
           },
           totalCorrections: {
-            headTiltCorrections: correction_breakdown.head_tilt || 0,
-            shoulderCorrections: correction_breakdown.shoulder_bend || 0,
-            backCorrections: correction_breakdown.back_bend || 0,
-            proximityWarnings: correction_breakdown.too_close || 0,
-            total: total_corrections,
+            headTiltCorrections: nextCorrectionState.headTilt,
+            shoulderCorrections: nextCorrectionState.shoulder,
+            backCorrections: nextCorrectionState.back,
+            proximityWarnings: nextCorrectionState.proximity,
+            total: nextCorrectionState.total,
           },
         });
       } else {
@@ -230,40 +280,44 @@ router.post(
           1440
         );
 
-        // Update average scores
-        dailySummary.averageScores.headTilt = Math.round(
-          (dailySummary.averageScores.headTilt * currentSessions +
-            session.scores.headTiltScore) /
-            (currentSessions + 1)
-        );
-        dailySummary.averageScores.shoulderAlignment = Math.round(
-          (dailySummary.averageScores.shoulderAlignment * currentSessions +
-            session.scores.shoulderAlignmentScore) /
-            (currentSessions + 1)
-        );
-        dailySummary.averageScores.spinalPosture = Math.round(
-          (dailySummary.averageScores.spinalPosture * currentSessions +
-            session.scores.spinalPostureScore) /
-            (currentSessions + 1)
-        );
-        dailySummary.averageScores.overall = Math.round(
-          (dailySummary.averageScores.overall * currentSessions +
-            overall_score) /
-            (currentSessions + 1)
-        );
+        // Update average scores only on true new sessions.
+        if (isNewSession) {
+          dailySummary.averageScores.headTilt = Math.round(
+            (dailySummary.averageScores.headTilt * currentSessions +
+              session.scores.headTiltScore) /
+              (currentSessions + 1)
+          );
+          dailySummary.averageScores.shoulderAlignment = Math.round(
+            (dailySummary.averageScores.shoulderAlignment * currentSessions +
+              session.scores.shoulderAlignmentScore) /
+              (currentSessions + 1)
+          );
+          dailySummary.averageScores.spinalPosture = Math.round(
+            (dailySummary.averageScores.spinalPosture * currentSessions +
+              session.scores.spinalPostureScore) /
+              (currentSessions + 1)
+          );
+          dailySummary.averageScores.overall = Math.round(
+            (dailySummary.averageScores.overall * currentSessions +
+              overall_score) /
+              (currentSessions + 1)
+          );
+        }
 
         // Update correction counts
         dailySummary.totalCorrections.headTiltCorrections +=
-          correction_breakdown.head_tilt || 0;
+          correctionBreakdownIncrement.headTilt;
         dailySummary.totalCorrections.shoulderCorrections +=
-          correction_breakdown.shoulder_bend || 0;
+          correctionBreakdownIncrement.shoulder;
         dailySummary.totalCorrections.backCorrections +=
-          correction_breakdown.back_bend || 0;
+          correctionBreakdownIncrement.back;
         dailySummary.totalCorrections.proximityWarnings +=
-          correction_breakdown.too_close || 0;
-        dailySummary.totalCorrections.total += total_corrections;
+          correctionBreakdownIncrement.proximity;
+        dailySummary.totalCorrections.total += correctionIncrement;
 
-        dailySummary.sessionsCount = currentSessions + 1;
+        if (isNewSession) {
+          dailySummary.sessionsCount = currentSessions + 1;
+        }
       }
 
       // Compute cumulativeDuration: sum of all prior days' totalTimeTracked (in seconds) + today
@@ -1154,9 +1208,12 @@ router.post("/update-realtime", authenticateToken, async (req, res, next) => {
       duration_seconds,
     } = req.body;
     const feedbackList = Array.isArray(feedback) ? feedback : [];
-    const correctionIncrement = Array.isArray(feedback)
+    const incomingCorrectionCount = Array.isArray(feedback)
       ? feedback.length
       : Math.max(0, Number(feedback) || 0);
+    let correctionIncrement = Array.isArray(feedback)
+      ? incomingCorrectionCount
+      : 0;
 
     const authenticatedUserId = req.userId?.toString?.();
 
@@ -1196,6 +1253,7 @@ router.post("/update-realtime", authenticateToken, async (req, res, next) => {
       "deviceInfo.sessionId": session_id,
       startTime: { $gte: today },
     });
+    const isNewSession = !session;
     const previousSessionDuration = session
       ? Math.max(0, Number(session.duration) || 0)
       : 0;
@@ -1214,7 +1272,7 @@ router.post("/update-realtime", authenticateToken, async (req, res, next) => {
           overallScore: scores?.overallScore || 0,
         },
         postureMetrics: {
-          totalCorrections: correctionIncrement,
+          totalCorrections: incomingCorrectionCount,
           headTiltCount: 0,
           shoulderBendingCount: 0,
           backBendingCount: 0,
@@ -1249,8 +1307,21 @@ router.post("/update-realtime", authenticateToken, async (req, res, next) => {
 
       session.postureMetrics = {
         ...session.postureMetrics,
-        totalCorrections:
-          (session.postureMetrics?.totalCorrections || 0) + correctionIncrement,
+        totalCorrections: (() => {
+          const previousCorrections = Math.max(
+            0,
+            Number(session.postureMetrics?.totalCorrections || 0)
+          );
+          if (Array.isArray(feedback)) {
+            correctionIncrement = incomingCorrectionCount;
+            return previousCorrections + correctionIncrement;
+          }
+          correctionIncrement = Math.max(
+            0,
+            incomingCorrectionCount - previousCorrections
+          );
+          return Math.max(previousCorrections, incomingCorrectionCount);
+        })(),
         averagePostureScore:
           scores?.overallScore ||
           session.postureMetrics?.averagePostureScore ||
@@ -1306,7 +1377,7 @@ router.post("/update-realtime", authenticateToken, async (req, res, next) => {
           shoulderCorrections: 0,
           backCorrections: 0,
           proximityWarnings: 0,
-          total: correctionIncrement,
+          total: incomingCorrectionCount,
         },
         sessionsCount: 1,
       });
@@ -1321,7 +1392,7 @@ router.post("/update-realtime", authenticateToken, async (req, res, next) => {
         (dailySummary.totalTimeTracked || 0) + sessionDurationIncrement;
 
       // Calculate weighted averages for scores
-      if (scores) {
+      if (scores && isNewSession) {
         dailySummary.averageScores = {
           headTilt:
             scores.headTilt !== undefined
@@ -1393,7 +1464,9 @@ router.post("/update-realtime", authenticateToken, async (req, res, next) => {
           (dailySummary.totalCorrections?.total || 0) + correctionIncrement,
       };
 
-      dailySummary.sessionsCount = currentSessions + 1;
+      if (isNewSession) {
+        dailySummary.sessionsCount = currentSessions + 1;
+      }
 
       logger.info(
         `Updated daily summary for user ${authenticatedUserId} on ${dateStr}`
@@ -1469,44 +1542,83 @@ router.get("/hourly-trends", authenticateToken, async (req, res) => {
 
     const now = new Date();
     const today = new Date(now.getFullYear(), now.getMonth(), now.getDate());
+    const tomorrow = new Date(today.getTime() + 24 * 60 * 60 * 1000);
     const sevenDaysAgo = new Date(today);
-    sevenDaysAgo.setDate(sevenDaysAgo.getDate() - 7);
+    sevenDaysAgo.setDate(sevenDaysAgo.getDate() - 6);
+
+    const getSessionReferenceTime = (session) => {
+      const candidate =
+        session?.lastUpdate ||
+        session?.endTime ||
+        session?.startTime ||
+        session?.createdAt;
+      const parsed = new Date(candidate);
+      return Number.isFinite(parsed.getTime()) ? parsed : null;
+    };
 
     // Get today's hourly data for real-time trends
     const todaySessions = await PostureSession.find({
       userId,
-      createdAt: {
-        $gte: today,
-        $lt: new Date(today.getTime() + 24 * 60 * 60 * 1000),
-      },
-    }).sort({ createdAt: 1 });
+      $or: [
+        { startTime: { $gte: today, $lt: tomorrow } },
+        { createdAt: { $gte: today, $lt: tomorrow } },
+      ],
+    }).sort({ lastUpdate: -1, updatedAt: -1, createdAt: -1 });
+
+    const todaySessionMap = new Map();
+    todaySessions.forEach((session) => {
+      const key = session?.deviceInfo?.sessionId || String(session?._id);
+      const existing = todaySessionMap.get(key);
+      if (!existing) {
+        todaySessionMap.set(key, session);
+        return;
+      }
+
+      const existingTime = getSessionReferenceTime(existing)?.getTime() || 0;
+      const nextTime = getSessionReferenceTime(session)?.getTime() || 0;
+      if (nextTime > existingTime) {
+        todaySessionMap.set(key, session);
+        return;
+      }
+
+      const existingDuration = normalizeDurationMinutes(existing?.duration || 0);
+      const nextDuration = normalizeDurationMinutes(session?.duration || 0);
+      if (nextDuration > existingDuration) {
+        todaySessionMap.set(key, session);
+      }
+    });
+    const dedupedTodaySessions = Array.from(todaySessionMap.values());
 
     // Generate hourly data for today (0-23 hours)
     const hourlyData = [];
     for (let hour = 0; hour < 24; hour++) {
-      const hourStart = new Date(today.getTime() + hour * 60 * 60 * 1000);
-      const hourEnd = new Date(hourStart.getTime() + 60 * 60 * 1000);
-
-      const hourSessions = todaySessions.filter((session) => {
-        const sessionHour = session.createdAt.getHours();
-        return sessionHour === hour;
+      const hourSessions = dedupedTodaySessions.filter((session) => {
+        const refTime = getSessionReferenceTime(session);
+        if (!refTime) return false;
+        return refTime.getHours() === hour;
       });
 
       if (hourSessions.length > 0) {
         const avgOverall =
-          hourSessions.reduce((sum, s) => sum + (s.overallScore || 0), 0) /
+          hourSessions.reduce(
+            (sum, s) => sum + extractSessionScore(s, "overallScore"),
+            0
+          ) /
           hourSessions.length;
         const avgHead =
-          hourSessions.reduce((sum, s) => sum + (s.headTiltScore || 0), 0) /
+          hourSessions.reduce(
+            (sum, s) => sum + extractSessionScore(s, "headTiltScore"),
+            0
+          ) /
           hourSessions.length;
         const avgShoulder =
           hourSessions.reduce(
-            (sum, s) => sum + (s.shoulderAlignmentScore || 0),
+            (sum, s) => sum + extractSessionScore(s, "shoulderAlignmentScore"),
             0
           ) / hourSessions.length;
         const avgSpinal =
           hourSessions.reduce(
-            (sum, s) => sum + (s.spinalPostureScore || 0),
+            (sum, s) => sum + extractSessionScore(s, "spinalPostureScore"),
             0
           ) / hourSessions.length;
 
@@ -1531,40 +1643,60 @@ router.get("/hourly-trends", authenticateToken, async (req, res) => {
       }
     }
 
-    // Get daily trends for the past 7 days
+    // Get daily trends for today + previous 6 days
+    const weekDailySummaries = await DailySummary.find({
+      userId,
+      date: { $gte: sevenDaysAgo, $lt: tomorrow },
+    }).lean();
+
+    const summaryByDate = new Map();
+    weekDailySummaries.forEach((summary) => {
+      const d = new Date(summary.date);
+      if (!Number.isFinite(d.getTime())) return;
+      const key = d.toISOString().split("T")[0];
+      summaryByDate.set(key, summary);
+    });
+
     const dailyTrends = [];
     for (let i = 6; i >= 0; i--) {
-      const dayStart = new Date(
-        sevenDaysAgo.getTime() + i * 24 * 60 * 60 * 1000
-      );
-      const dayEnd = new Date(dayStart.getTime() + 24 * 60 * 60 * 1000);
+      const dayStart = new Date(today.getTime() - i * 24 * 60 * 60 * 1000);
+      const dayKey = dayStart.toISOString().split("T")[0];
+      const summary = summaryByDate.get(dayKey);
 
-      const daySessions = await PostureSession.find({
-        userId,
-        createdAt: { $gte: dayStart, $lt: dayEnd },
-      });
+      if (summary) {
+        const avgScore = extractSessionScore(
+          { scores: { overallScore: summary?.averageScores?.overall } },
+          "overallScore"
+        );
+        const totalTime = normalizeDurationMinutes(summary?.totalTimeTracked || 0);
+        const sessionCount = Math.max(0, Number(summary?.sessionsCount || 0));
 
-      if (daySessions.length > 0) {
-        const avgScore =
-          daySessions.reduce((sum, s) => sum + (s.overallScore || 0), 0) /
-          daySessions.length;
-        const totalTime = daySessions.reduce(
-          (sum, s) => sum + (s.duration || 0),
+        dailyTrends.push({
+          date: dayKey,
+          averageScore: Math.round(avgScore * 10) / 10,
+          totalTime: Math.round(totalTime),
+          sessionCount,
+        });
+      } else {
+        const todayFallbackSessions =
+          dayKey === today.toISOString().split("T")[0] ? dedupedTodaySessions : [];
+        const fallbackAvg =
+          todayFallbackSessions.length > 0
+            ? todayFallbackSessions.reduce(
+                (sum, s) => sum + extractSessionScore(s, "overallScore"),
+                0
+              ) / todayFallbackSessions.length
+            : 0;
+        const fallbackMinutes = todayFallbackSessions.reduce(
+          (sum, s) => sum + normalizeDurationMinutes(s?.duration || 0),
           0
         );
 
         dailyTrends.push({
-          date: dayStart.toISOString().split("T")[0],
-          averageScore: Math.round(avgScore * 10) / 10,
-          totalTime: Math.round(totalTime / 60), // Convert to minutes
-          sessionCount: daySessions.length,
-        });
-      } else {
-        dailyTrends.push({
-          date: dayStart.toISOString().split("T")[0],
-          averageScore: 0,
-          totalTime: 0,
-          sessionCount: 0,
+          date: dayKey,
+          averageScore: Math.round(fallbackAvg * 10) / 10,
+          totalTime: Math.round(fallbackMinutes),
+          sessionCount: todayFallbackSessions.length,
         });
       }
     }
@@ -1613,14 +1745,17 @@ router.get("/live-dashboard", authenticateToken, async (req, res) => {
     // Calculate live stats
     const currentScore =
       todaySessions.length > 0
-        ? todaySessions[todaySessions.length - 1].overallScore || 0
+        ? extractSessionScore(todaySessions[todaySessions.length - 1], "overallScore")
         : 0;
 
     const sessionsToday = todaySessions.length;
     const timeToday = todaySummary ? todaySummary.totalTimeTracked : 0;
     const averageScore =
       todaySessions.length > 0
-        ? todaySessions.reduce((sum, s) => sum + (s.overallScore || 0), 0) /
+        ? todaySessions.reduce(
+            (sum, s) => sum + extractSessionScore(s, "overallScore"),
+            0
+          ) /
           todaySessions.length
         : 0;
     const totalCorrections = todaySummary

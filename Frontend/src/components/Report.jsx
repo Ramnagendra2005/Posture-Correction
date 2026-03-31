@@ -1,4 +1,4 @@
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useMemo } from 'react';
 import useAuth from '../hooks/useAuth';
 const API_BASE = import.meta.env.VITE_API_BASE_URL || 'http://localhost:3001';
 import { 
@@ -157,6 +157,17 @@ export default function Report() {
         // Set empty state instead of demo data - truly dynamic
         setReportData({
           currentScore: 0,
+          neckScore: 0,
+          shoulderScore: 0,
+          backScore: 0,
+          headTiltScore: 0,
+          shoulderAlignmentScore: 0,
+          spinalPostureScore: 0,
+          todayMinutes: 0,
+          todaySessions: 0,
+          todayCorrections: 0,
+          todayAvgScore: 0,
+          todayBestScore: 0,
           timeTracked: 0,
           totalSessions: 0,
           totalCorrections: 0,
@@ -180,15 +191,75 @@ export default function Report() {
     return `${hours}:${minutes.toString().padStart(2, '0')}:${secs.toString().padStart(2, '0')}`;
   };
 
+  const formatMinutes = (minutesInput) => {
+    const totalMinutes = Math.max(0, Math.floor(Number(minutesInput) || 0));
+    const hours = Math.floor(totalMinutes / 60);
+    const minutes = totalMinutes % 60;
+    return `${hours}h ${minutes}m`;
+  };
+
+  const normalizeScore = (value) => {
+    const n = Number(value);
+    if (!Number.isFinite(n)) return 0;
+    return Math.max(0, Math.min(100, Math.round(n)));
+  };
+
+  const postureScoreBreakdown = useMemo(() => {
+    const shoulder = normalizeScore(
+      reportData?.shoulderScore ?? reportData?.shoulderAlignmentScore
+    );
+    const neck = normalizeScore(
+      reportData?.neckScore ?? reportData?.headTiltScore
+    );
+    const back = normalizeScore(
+      reportData?.backScore ?? reportData?.spinalPostureScore
+    );
+
+    const fallbackOverall = normalizeScore((shoulder + neck + back) / 3);
+    const overall = normalizeScore(
+      reportData?.currentScore ?? reportData?.overallScore ?? fallbackOverall
+    );
+
+    return {
+      overall,
+      shoulder,
+      neck,
+      back,
+    };
+  }, [reportData]);
+
+  const performanceOverviewData = useMemo(() => {
+    const baselineScore = normalizeScore(
+      reportData?.todayAvgScore ??
+      reportData?.currentScore ??
+      reportData?.averageScore ??
+      0
+    );
+
+    return [
+      {
+        name: 'Good Posture',
+        value: baselineScore,
+        fill: colors.chart.success,
+      },
+      {
+        name: 'Needs Improvement',
+        value: Math.max(0, 100 - baselineScore),
+        fill: colors.chart.warning,
+      },
+    ];
+  }, [reportData, colors.chart.success, colors.chart.warning]);
+
   // Score ring with blue accent and smooth animation
   const ScoreRing = ({ score, size = 180, strokeWidth = 8 }) => {
+    const safeScore = normalizeScore(score);
     const radius = (size - strokeWidth) / 2;
     const circumference = 2 * Math.PI * radius;
-    const strokeDashoffset = circumference - (score / 100) * circumference;
+    const strokeDashoffset = circumference - (safeScore / 100) * circumference;
 
     let color = '#ef4444';
-    if (score >= 80) color = '#10b981';
-    else if (score >= 60) color = '#f59e0b';
+    if (safeScore >= 80) color = '#10b981';
+    else if (safeScore >= 60) color = '#f59e0b';
 
     return (
       <div className="relative flex flex-col items-center justify-center">
@@ -217,7 +288,7 @@ export default function Report() {
           />
         </svg>
         <div className="absolute flex flex-col items-center justify-center text-center">
-          <span className="text-4xl font-bold text-[#3b82f6]">{score}</span>
+          <span className="text-4xl font-bold text-[#3b82f6]">{safeScore}</span>
           <span className="text-sm text-[#64748b]">out of 100</span>
         </div>
       </div>
@@ -368,7 +439,12 @@ export default function Report() {
         <section className="grid grid-cols-1 lg:grid-cols-3 gap-8">
           <div className={`${colors.cardBg} rounded-xl p-6 flex flex-col items-center shadow-lg hover:shadow-xl transition-shadow duration-300 border border-gray-200`}>
             <h2 className={`text-xl font-semibold mb-4 ${colors.textSecondary}`}>Overall Posture Score</h2>
-            <ScoreRing score={reportData?.currentScore || 0} />
+            <ScoreRing score={postureScoreBreakdown.overall} />
+            <div className="mt-5 w-full grid grid-cols-3 gap-3">
+              <ComponentScore title="Shoulders" score={postureScoreBreakdown.shoulder} icon={<span className="text-white text-sm font-bold">S</span>} />
+              <ComponentScore title="Neck" score={postureScoreBreakdown.neck} icon={<span className="text-white text-sm font-bold">N</span>} />
+              <ComponentScore title="Back" score={postureScoreBreakdown.back} icon={<span className="text-white text-sm font-bold">B</span>} />
+            </div>
             <p className={`mt-4 text-center ${colors.textSecondary} text-sm`}>
               {reportData?.scoreTrend === "improving" && "Your posture is improving! Keep up the good work."}
               {reportData?.scoreTrend === "declining" && "Your posture has been declining. Try to be more mindful."}
@@ -379,26 +455,25 @@ export default function Report() {
           <div className={`${colors.cardBg} rounded-xl p-6 shadow-lg hover:shadow-xl transition-shadow duration-300 border border-gray-200`}>
             <h2 className={`text-xl font-semibold mb-4 ${colors.textSecondary}`}>Today's Summary</h2>
             <div className="grid grid-cols-2 gap-4">
-              {/* <StatCard
+              <StatCard
                 icon="⏱️"
                 title="Time Tracked"
-                value={`${Math.floor((reportData?.todayMinutes || 0) / 60)}h ${Math.floor((reportData?.todayMinutes || 0) % 60)}m`}
-              /> */}
+                value={formatMinutes(reportData?.todayMinutes || 0)}
+              />
               <StatCard
-                icon="🔄"
-                title="Today's Corrections"
+                icon="📊"
+                title="Today's Sessions"
                 value={reportData?.todaySessions || 0}
               />
-              {/* <StatCard
-                icon="⚠️"
-                title="Corrections"
-                value={reportData?.totalCorrections || 0}
-                trend={reportData?.scoreTrend}
-              /> */}
               <StatCard
-                icon="☕"
-                title="Breaks Taken"
-                value={reportData?.totalBreaks || 0}
+                icon="⚠️"
+                title="Today's Corrections"
+                value={reportData?.todayCorrections ?? reportData?.totalCorrections ?? 0}
+              />
+              <StatCard
+                icon="🎯"
+                title="Today's Avg Score"
+                value={`${reportData?.todayAvgScore ?? postureScoreBreakdown.overall}%`}
               />
             </div>
           </div>
@@ -415,7 +490,7 @@ export default function Report() {
               <StatCard
                 icon="📊"
                 title="Total corrections"
-                value={reportData?.totalSessions || 0}
+                value={reportData?.allTimeCorrections ?? reportData?.totalCorrections ?? 0}
               />
               <StatCard
                 icon="🎯"
@@ -938,9 +1013,17 @@ export default function Report() {
                       tickFormatter={(value) => new Date(value).toLocaleDateString('en-US', { month: 'short', day: 'numeric' })}
                     />
                     <YAxis 
+                      yAxisId="left"
                       domain={[0, 100]}
                       stroke="#64748b"
                       fontSize={12}
+                    />
+                    <YAxis
+                      yAxisId="right"
+                      orientation="right"
+                      stroke="#64748b"
+                      fontSize={12}
+                      allowDecimals={false}
                     />
                     <Tooltip 
                       contentStyle={{
@@ -949,7 +1032,13 @@ export default function Report() {
                         borderRadius: '8px'
                       }}
                       labelFormatter={(value) => new Date(value).toLocaleDateString('en-US', { weekday: 'long', month: 'short', day: 'numeric' })}
-                      formatter={(value, name) => [`${value}%`, name]}
+                      formatter={(value, name) => {
+                        const numeric = Number(value) || 0;
+                        if (String(name).toLowerCase().includes('time')) {
+                          return [`${numeric} min`, name];
+                        }
+                        return [`${numeric}%`, name];
+                      }}
                     />
                     <Legend />
                     <Area 
@@ -958,6 +1047,7 @@ export default function Report() {
                       stroke={colors.chart.primary}
                       fill={colors.chart.gradient}
                       strokeWidth={2}
+                      yAxisId="left"
                       name="Daily Average Score"
                     />
                     <Area 
@@ -1089,10 +1179,7 @@ export default function Report() {
                 <ResponsiveContainer width="100%" height="100%">
                   <PieChart>
                     <Pie
-                      data={[
-                        { name: 'Good Posture', value: Math.max(0, 100 - (reportData.totalCorrections || 0)), fill: colors.chart.success },
-                        { name: 'Corrections Made', value: reportData.totalCorrections || 0, fill: colors.chart.warning },
-                      ]}
+                      data={performanceOverviewData}
                       cx="50%"
                       cy="50%"
                       innerRadius={60}
@@ -1100,10 +1187,7 @@ export default function Report() {
                       paddingAngle={5}
                       dataKey="value"
                     >
-                      {[
-                        { name: 'Good Posture', value: Math.max(0, 100 - (reportData.totalCorrections || 0)), fill: colors.chart.success },
-                        { name: 'Corrections Made', value: reportData.totalCorrections || 0, fill: colors.chart.warning },
-                      ].map((entry, index) => (
+                      {performanceOverviewData.map((entry, index) => (
                         <Cell key={`cell-${index}`} fill={entry.fill} />
                       ))}
                     </Pie>
@@ -1113,6 +1197,7 @@ export default function Report() {
                         border: '1px solid #e5e7eb',
                         borderRadius: '8px'
                       }}
+                      formatter={(value, name) => [`${Number(value) || 0}%`, name]}
                     />
                     <Legend />
                   </PieChart>
@@ -1128,7 +1213,7 @@ export default function Report() {
               )}
             </div>
             <p className={`mt-4 text-sm ${colors.textSecondary}`}>
-              Overview of your posture performance showing good posture vs corrections needed.
+              Overview of your posture performance split by score quality.
             </p>
           </div>
         </section>

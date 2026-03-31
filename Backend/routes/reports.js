@@ -1,11 +1,135 @@
 const express = require("express");
 const { query, validationResult } = require("express-validator");
-const { PostureSession, PosturePattern, DailySummary } = require("../models");
+const { PostureSession, PosturePattern, DailySummary, TrackedTime } = require("../models");
 const { buildDailyEmail } = require("../services/dailyReportService");
 const { sendMail } = require("../services/emailService");
 const logger = require("../utils/logger");
 
 const router = express.Router();
+
+const clampScore = (value) => {
+  const n = Number(value);
+  if (!Number.isFinite(n)) return 0;
+  return Math.max(0, Math.min(100, n));
+};
+
+const toDateKey = (value) => {
+  const d = new Date(value);
+  if (!Number.isFinite(d.getTime())) return null;
+  const y = d.getFullYear();
+  const m = String(d.getMonth() + 1).padStart(2, "0");
+  const day = String(d.getDate()).padStart(2, "0");
+  return `${y}-${m}-${day}`;
+};
+
+const extractSessionScore = (session, sessionKey) => {
+  const candidates = [
+    session?.scores?.[sessionKey],
+    session?.[sessionKey],
+  ];
+  for (const candidate of candidates) {
+    const n = Number(candidate);
+    if (Number.isFinite(n)) {
+      return clampScore(n);
+    }
+  }
+  return 0;
+};
+
+const averageScores = (values) => {
+  const valid = values
+    .map((v) => Number(v))
+    .filter((v) => Number.isFinite(v) && v >= 0 && v <= 100);
+  if (!valid.length) return 0;
+  return valid.reduce((sum, v) => sum + v, 0) / valid.length;
+};
+
+const hasRealSummaryData = (summary) => {
+  if (!summary) return false;
+  return (Number(summary.sessionsCount) || 0) > 0;
+};
+
+const pickComponentScore = ({ todaySummary, weekDailySummaries, weekSessions, summaryKey, sessionKey }) => {
+  if (hasRealSummaryData(todaySummary)) {
+    const todayValue = Number(todaySummary?.averageScores?.[summaryKey]);
+    if (Number.isFinite(todayValue) && todayValue > 0) {
+      return clampScore(todayValue);
+    }
+  }
+
+  const weeklySummaryValues = weekDailySummaries
+    .filter(hasRealSummaryData)
+    .map((s) => Number(s?.averageScores?.[summaryKey]))
+    .filter((v) => Number.isFinite(v) && v > 0);
+
+  if (weeklySummaryValues.length > 0) {
+    return clampScore(averageScores(weeklySummaryValues));
+  }
+
+  const weeklySessionValues = weekSessions
+    .map((s) => extractSessionScore(s, sessionKey))
+    .filter((v) => Number.isFinite(v) && v > 0);
+
+  if (weeklySessionValues.length > 0) {
+    return clampScore(averageScores(weeklySessionValues));
+  }
+
+  return 0;
+};
+
+const computeCanonicalPostureScores = ({ todaySummary, weekDailySummaries, weekSessions }) => {
+  const neckScore = Math.round(
+    pickComponentScore({
+      todaySummary,
+      weekDailySummaries,
+      weekSessions,
+      summaryKey: "headTilt",
+      sessionKey: "headTiltScore",
+    })
+  );
+
+  const shoulderScore = Math.round(
+    pickComponentScore({
+      todaySummary,
+      weekDailySummaries,
+      weekSessions,
+      summaryKey: "shoulderAlignment",
+      sessionKey: "shoulderAlignmentScore",
+    })
+  );
+
+  const backScore = Math.round(
+    pickComponentScore({
+      todaySummary,
+      weekDailySummaries,
+      weekSessions,
+      summaryKey: "spinalPosture",
+      sessionKey: "spinalPostureScore",
+    })
+  );
+
+  const overallScore = Math.round(
+    averageScores([neckScore, shoulderScore, backScore])
+  );
+
+  return {
+    neckScore,
+    shoulderScore,
+    backScore,
+    overallScore,
+    headTiltScore: neckScore,
+    shoulderAlignmentScore: shoulderScore,
+    spinalPostureScore: backScore,
+  };
+};
+
+const normalizeMinutes = (value) => {
+  const n = Number(value);
+  if (!Number.isFinite(n) || n <= 0) return 0;
+  // Legacy safety: some durations may have been stored in seconds.
+  if (n > 1000) return n / 60;
+  return n;
+};
 
 // Send today's daily email to the authenticated user
 router.post("/send-daily-email", async (req, res) => {
@@ -75,6 +199,27 @@ router.get("/analytics", async (req, res, next) => {
       startTime: { $gte: weekStart },
     }).sort({ startTime: -1 });
 
+    // Deduplicate week sessions by stable device session id to avoid inflated
+    // trend points when realtime updates produced multiple noisy records.
+    const weekSessionMap = new Map();
+    weekSessions.forEach((session) => {
+      const key = session?.deviceInfo?.sessionId || String(session?._id);
+      const existing = weekSessionMap.get(key);
+      if (!existing) {
+        weekSessionMap.set(key, session);
+        return;
+      }
+
+      const existingDuration = normalizeMinutes(existing?.duration || 0);
+      const nextDuration = normalizeMinutes(session?.duration || 0);
+      if (nextDuration >= existingDuration) {
+        weekSessionMap.set(key, session);
+      }
+    });
+    const dedupedWeekSessions = Array.from(weekSessionMap.values()).sort(
+      (a, b) => new Date(b.startTime).getTime() - new Date(a.startTime).getTime()
+    );
+
     // Get month's sessions
     const monthSessions = await PostureSession.find({
       userId,
@@ -88,17 +233,115 @@ router.get("/analytics", async (req, res, next) => {
       date: { $gte: todayStart, $lt: todayEnd },
     }).lean();
 
-    // Calculate today's metrics (hours)
-    const todayTimeTracked = (todaySummary?.totalTimeTracked || 0) / 60; // minutes -> hours
+    // Deduplicate today's sessions by sessionId to avoid over-counting when
+    // realtime updates created noisy duplicates historically.
+    const todaySessionMap = new Map();
+    for (const session of todaySessions) {
+      const key = session?.deviceInfo?.sessionId || String(session?._id);
+      const existing =
+        todaySessionMap.get(key) ||
+        {
+          durationMinutes: 0,
+          corrections: 0,
+          score: 0,
+          hasSignal: false,
+        };
 
-    // Prefer corrections from DailySummary; fall back to sessions sum
-    const todayFeedbackCount =
-      todaySummary?.totalCorrections?.total ??
-      todaySessions.reduce(
-        (total, session) =>
-          total + (session.postureMetrics?.totalCorrections || 0),
-        0
+      let minutes = normalizeMinutes(session?.duration || 0);
+      if (minutes <= 0 && session?.startTime) {
+        const start = new Date(session.startTime).getTime();
+        const end =
+          session.status === "active"
+            ? now.getTime()
+            : session.endTime
+            ? new Date(session.endTime).getTime()
+            : start;
+        minutes = Math.max(0, (end - start) / (1000 * 60));
+      }
+
+      const corrections = Math.max(
+        0,
+        Number(session?.postureMetrics?.totalCorrections || 0)
       );
+      const score = clampScore(session?.scores?.overallScore || 0);
+      const hasSignal =
+        minutes > 0.1 ||
+        corrections > 0 ||
+        Boolean(session?.endTime) ||
+        session?.status === "active" ||
+        session?.status === "completed";
+
+      todaySessionMap.set(key, {
+        durationMinutes: Math.max(existing.durationMinutes, minutes),
+        corrections: Math.max(existing.corrections, corrections),
+        score: score > 0 ? score : existing.score,
+        hasSignal: existing.hasSignal || hasSignal,
+      });
+    }
+
+    const todaySessionRows = Array.from(todaySessionMap.values()).filter(
+      (row) => row.hasSignal
+    );
+    const sessionDerivedTodayMinutes = todaySessionRows.reduce(
+      (sum, row) => sum + row.durationMinutes,
+      0
+    );
+
+    const trackedTodayDoc = await TrackedTime.findOne({
+      userId,
+      date: { $gte: todayStart, $lt: todayEnd },
+    }).lean();
+    const trackedTodayMinutes = Math.max(
+      0,
+      Number(trackedTodayDoc?.todaysTimeTrackedSeconds || 0) / 60
+    );
+
+    const summaryTodayMinutes = normalizeMinutes(todaySummary?.totalTimeTracked || 0);
+    const todayMinutesRaw =
+      trackedTodayMinutes > 0
+        ? trackedTodayMinutes
+        : sessionDerivedTodayMinutes > 0
+        ? sessionDerivedTodayMinutes
+        : summaryTodayMinutes;
+    const todayMinutes = Math.min(1440, todayMinutesRaw);
+    const todayTimeTracked = todayMinutes / 60; // minutes -> hours
+    const todaySessionsCount = todaySessionRows.length;
+
+    const todayCorrectionsFromSummary = Number(
+      todaySummary?.totalCorrections?.total || 0
+    );
+    const todayCorrectionsFromSessions = todaySessionRows.reduce(
+      (total, row) =>
+        total + row.corrections,
+      0
+    );
+    const todayFeedbackCount = Math.max(
+      todayCorrectionsFromSummary,
+      todayCorrectionsFromSessions
+    );
+
+    const todayAverageFromSummary = hasRealSummaryData(todaySummary)
+      ? Number(todaySummary?.averageScores?.overall || 0)
+      : 0;
+    const todayAverageFromSessions =
+      todaySessionRows.length > 0
+        ? todaySessionRows.reduce((sum, row) => sum + row.score, 0) /
+          todaySessionRows.length
+        : 0;
+    const todayAvgScore = Math.round(
+      Math.max(todayAverageFromSummary, todayAverageFromSessions)
+    );
+
+    const todayBestFromSummary = hasRealSummaryData(todaySummary)
+      ? Number(todaySummary?.qualityMetrics?.bestSessionScore || 0)
+      : 0;
+    const todayBestFromSessions =
+      todaySessionRows.length > 0
+        ? Math.max(...todaySessionRows.map((row) => row.score))
+        : 0;
+    const todayBestScore = Math.round(
+      Math.max(todayBestFromSummary, todayBestFromSessions)
+    );
 
     // Calculate weekly metrics (sum of per-day totals from DailySummary)
     const weekDailySummaries = await DailySummary.find({
@@ -111,43 +354,44 @@ router.get("/analytics", async (req, res, next) => {
         0
       ) / 60; // minutes -> hours
 
-    const weekFeedbackCount = weekSessions.reduce(
+    const weekFeedbackCount = dedupedWeekSessions.reduce(
       (total, session) =>
         total + (session.postureMetrics?.totalCorrections || 0),
       0
     );
 
-    // Calculate current score (latest session)
-    const latestSession = todaySessions[0];
-    const currentScore = latestSession
-      ? latestSession.scores?.overallScore || 0
-      : 0;
+    const canonicalScores = computeCanonicalPostureScores({
+      todaySummary,
+      weekDailySummaries,
+      weekSessions: dedupedWeekSessions,
+    });
 
-    // Calculate week average
+    const weekSummariesWithOverall = weekDailySummaries.filter(
+      (s) => hasRealSummaryData(s) && Number(s?.averageScores?.overall) > 0
+    );
     const weekAvgScore =
-      weekSessions.length > 0
-        ? weekSessions.reduce(
-            (sum, session) => sum + (session.scores?.overallScore || 0),
-            0
-          ) / weekSessions.length
-        : 0;
+      weekSummariesWithOverall.length > 0
+        ? averageScores(
+            weekSummariesWithOverall.map((s) => Number(s.averageScores?.overall))
+          )
+        : canonicalScores.overallScore;
 
     // Calculate trend
-    const recentSessions = weekSessions.slice(0, 3);
-    const olderSessions = weekSessions.slice(3, 6);
+    const recentSessions = dedupedWeekSessions.slice(0, 3);
+    const olderSessions = dedupedWeekSessions.slice(3, 6);
+    const recentScores = recentSessions
+      .map((s) => extractSessionScore(s, "overallScore"))
+      .filter((v) => v > 0);
+    const olderScores = olderSessions
+      .map((s) => extractSessionScore(s, "overallScore"))
+      .filter((v) => v > 0);
     const recentAvg =
-      recentSessions.length > 0
-        ? recentSessions.reduce(
-            (sum, s) => sum + (s.scores?.overallScore || 0),
-            0
-          ) / recentSessions.length
+      recentScores.length > 0
+        ? averageScores(recentScores)
         : 0;
     const olderAvg =
-      olderSessions.length > 0
-        ? olderSessions.reduce(
-            (sum, s) => sum + (s.scores?.overallScore || 0),
-            0
-          ) / olderSessions.length
+      olderScores.length > 0
+        ? averageScores(olderScores)
         : 0;
 
     const scoreTrend =
@@ -163,47 +407,14 @@ router.get("/analytics", async (req, res, next) => {
       date: { $gte: weekStart },
     }).sort({ date: 1 });
 
-    // Calculate component scores from recent sessions
     const componentScores = {
-      headTiltScore: 0,
-      shoulderAlignmentScore: 0,
-      spinalPostureScore: 0,
+      ...canonicalScores,
       hipBalanceScore: 0, // Dynamic - no default values
       legPositionScore: 0, // Dynamic - no default values
     };
 
-    if (recentSessions.length > 0) {
-      componentScores.headTiltScore = Math.round(
-        recentSessions.reduce(
-          (sum, s) => sum + (s.scores?.headTiltScore || 0),
-          0
-        ) / recentSessions.length
-      );
-      componentScores.shoulderAlignmentScore = Math.round(
-        recentSessions.reduce(
-          (sum, s) => sum + (s.scores?.shoulderAlignmentScore || 0),
-          0
-        ) / recentSessions.length
-      );
-      componentScores.spinalPostureScore = Math.round(
-        recentSessions.reduce(
-          (sum, s) => sum + (s.scores?.spinalPostureScore || 0),
-          0
-        ) / recentSessions.length
-      );
-    }
-
     // Get all daily summaries for cumulative time calculation
     const allDailySummaries = await DailySummary.find({ userId });
-
-    // Get today's daily summary for today's time in consistent format
-    const todayDailySummary = await DailySummary.findOne({
-      userId,
-      date: {
-        $gte: todayStart,
-        $lt: new Date(todayStart.getTime() + 24 * 60 * 60 * 1000),
-      },
-    });
 
     // Calculate cumulative duration from the latest daily summary
     // This ensures we get the most up-to-date cumulative time
@@ -231,15 +442,26 @@ router.get("/analytics", async (req, res, next) => {
 
     // Format time for display
     const formatTime = (seconds) => {
-      const hours = Math.floor(seconds / 3600);
-      const minutes = Math.floor((seconds % 3600) / 60);
-      const secs = seconds % 60;
+      const total = Math.max(0, Math.floor(Number(seconds) || 0));
+      const hours = Math.floor(total / 3600);
+      const minutes = Math.floor((total % 3600) / 60);
+      const secs = total % 60;
       return `${hours}:${minutes.toString().padStart(2, "0")}:${secs
         .toString()
         .padStart(2, "0")}`;
     };
 
     // Get weekly trend data for charts
+    const weeklySummaryByDate = new Map();
+    weekDailySummaries.forEach((summary) => {
+      if (!hasRealSummaryData(summary)) return;
+      const key = toDateKey(summary?.date);
+      if (!key) return;
+      const score = Number(summary?.averageScores?.overall);
+      if (!Number.isFinite(score) || score <= 0) return;
+      weeklySummaryByDate.set(key, clampScore(score));
+    });
+
     const weeklyTrendData = [];
     for (let i = 6; i >= 0; i--) {
       const date = new Date(now.getTime() - i * 24 * 60 * 60 * 1000);
@@ -255,18 +477,22 @@ router.get("/analytics", async (req, res, next) => {
         date.getDate()
       );
       const dayEnd = new Date(dayStart.getTime() + 24 * 60 * 60 * 1000);
-      const daySessions = weekSessions.filter(
+      const daySessions = dedupedWeekSessions.filter(
         (s) => s.startTime >= dayStart && s.startTime < dayEnd
       );
 
+      const sessionScores = daySessions
+        .map((s) => extractSessionScore(s, "overallScore"))
+        .filter((v) => v > 0);
+
+      const dayKey = toDateKey(dayStart);
+      const summaryScore = dayKey ? weeklySummaryByDate.get(dayKey) || 0 : 0;
+
       const avgScore =
-        daySessions.length > 0
-          ? Math.round(
-              daySessions.reduce(
-                (sum, s) => sum + (s.scores?.overallScore || 0),
-                0
-              ) / daySessions.length
-            )
+        summaryScore > 0
+          ? Math.round(summaryScore)
+          : sessionScores.length > 0
+          ? Math.round(averageScores(sessionScores))
           : 0;
 
       weeklyTrendData.push({
@@ -290,7 +516,7 @@ router.get("/analytics", async (req, res, next) => {
         date.getDate()
       );
       const dayEnd = new Date(dayStart.getTime() + 24 * 60 * 60 * 1000);
-      const daySessionCount = weekSessions.filter(
+      const daySessionCount = dedupedWeekSessions.filter(
         (s) => s.startTime >= dayStart && s.startTime < dayEnd
       ).length;
 
@@ -301,17 +527,25 @@ router.get("/analytics", async (req, res, next) => {
     }
 
     // Response data
+    const allTimeCorrections = allDailySummaries.reduce(
+      (sum, summary) => sum + Number(summary?.totalCorrections?.total || 0),
+      0
+    );
+
     const summary = {
-      currentScore: Math.round(currentScore),
+      currentScore: Math.round(canonicalScores.overallScore),
       timeTracked: Math.round(todayTimeTracked * 10) / 10, // TODAY'S time
-      todayMinutes: todaySummary?.totalTimeTracked || 0, // precise minutes for today
-      todaySessions: todaySessions.length, // TODAY'S session count
+      todayMinutes: Math.round(todayMinutes),
+      todaySessions: todaySessionsCount,
+      todayCorrections: todayFeedbackCount,
       totalSessions: allDailySummaries.reduce(
         (total, summary) => total + (summary.sessionsCount || 0),
         0
       ), // ALL-TIME session count
       totalCorrections: todayFeedbackCount, // TODAY'S corrections
-      totalBreaks: Math.floor(todayTimeTracked * 2), // TODAY'S breaks estimate
+      allTimeCorrections,
+      totalBreaks: Math.floor(todayTimeTracked * 2), // legacy alias (today estimate)
+      todayBreaks: Math.floor(todayTimeTracked * 2),
       averageScore: Math.round(weekAvgScore), // WEEKLY average
       scoreTrend,
       // Add cumulative time tracking
@@ -326,19 +560,8 @@ router.get("/analytics", async (req, res, next) => {
       weekCorrections: weekFeedbackCount,
       weekBreaks: Math.floor(weekTimeTracked * 2),
       // Additional today-specific metrics
-      todayBestScore:
-        todaySessions.length > 0
-          ? Math.max(...todaySessions.map((s) => s.scores?.overallScore || 0))
-          : 0,
-      todayAvgScore:
-        todaySessions.length > 0
-          ? Math.round(
-              todaySessions.reduce(
-                (sum, s) => sum + (s.scores?.overallScore || 0),
-                0
-              ) / todaySessions.length
-            )
-          : 0,
+      todayBestScore,
+      todayAvgScore,
       // Component scores from recent sessions
       ...componentScores,
       // Chart data
@@ -349,12 +572,12 @@ router.get("/analytics", async (req, res, next) => {
     res.json({
       success: true,
       summary,
-      sessions: weekSessions.map((session) => ({
+      sessions: dedupedWeekSessions.map((session) => ({
         id: session._id,
         startTime: session.startTime,
         endTime: session.endTime,
         duration: session.duration,
-        overallScore: session.scores?.overallScore || 0,
+        overallScore: extractSessionScore(session, "overallScore"),
         scores: session.scores,
       })),
       dailySummaries: dailySummaries.map((summary) => ({
