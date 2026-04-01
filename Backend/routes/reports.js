@@ -3,6 +3,7 @@ const { query, validationResult } = require("express-validator");
 const { PostureSession, PosturePattern, DailySummary, TrackedTime } = require("../models");
 const { buildDailyEmail } = require("../services/dailyReportService");
 const { sendMail } = require("../services/emailService");
+const { generatePostureReport, renderReportAsEmailHtml } = require("../services/reportAgentService");
 const logger = require("../utils/logger");
 
 const router = express.Router();
@@ -328,8 +329,11 @@ router.get("/analytics", async (req, res, next) => {
         ? todaySessionRows.reduce((sum, row) => sum + row.score, 0) /
           todaySessionRows.length
         : 0;
+    // Use sessions average if available (most current data), otherwise use summary
     const todayAvgScore = Math.round(
-      Math.max(todayAverageFromSummary, todayAverageFromSessions)
+      todayAverageFromSessions > 0
+        ? todayAverageFromSessions
+        : todayAverageFromSummary
     );
 
     const todayBestFromSummary = hasRealSummaryData(todaySummary)
@@ -1275,6 +1279,143 @@ router.get("/weekly-summary", async (req, res, next) => {
     });
   } catch (error) {
     next(error);
+  }
+});
+
+/**
+ * @route   POST /api/reports/generate-ai-report
+ * @desc    Generate an AI-powered comprehensive posture health report
+ * @access  Private
+ */
+router.post("/generate-ai-report", async (req, res) => {
+  try {
+    const userId = req.userId;
+    logger.info(`AI report generation requested by user ${userId}`);
+
+    // Check if Gemini API key is configured
+    if (
+      !process.env.GEMINI_API_KEY ||
+      process.env.GEMINI_API_KEY === "your_gemini_api_key_here"
+    ) {
+      return res.status(503).json({
+        success: false,
+        message: "AI report generation is not available. Please configure GEMINI_API_KEY.",
+      });
+    }
+
+    const result = await generatePostureReport(userId);
+
+    return res.json({
+      success: true,
+      report: result.report,
+      generatedAt: result.generatedAt || new Date().toISOString(),
+    });
+  } catch (err) {
+    logger.error("AI report generation failed:", err);
+    return res.status(500).json({
+      success: false,
+      message: "Failed to generate AI report: " + (err.message || "Unknown error"),
+    });
+  }
+});
+
+/**
+ * @route   POST /api/reports/email-ai-report
+ * @desc    Generate AI report, embed it into daily email, and send
+ * @access  Private
+ */
+router.post("/email-ai-report", async (req, res) => {
+  try {
+    const userId = req.userId;
+    logger.info(`AI email report requested by user ${userId}`);
+
+    // Check if Gemini API key is configured
+    if (
+      !process.env.GEMINI_API_KEY ||
+      process.env.GEMINI_API_KEY === "your_gemini_api_key_here"
+    ) {
+      return res.status(503).json({
+        success: false,
+        message: "AI report generation is not available. Please configure GEMINI_API_KEY.",
+      });
+    }
+
+    // Step 1: Generate the AI report
+    const aiResult = await generatePostureReport(userId);
+    const aiReportHtml = renderReportAsEmailHtml(aiResult.report);
+
+    // Step 2: Build the standard daily email
+    const { to, subject, html: baseHtml, text: baseText } = await buildDailyEmail(
+      userId,
+      new Date()
+    );
+
+    // Step 3: Inject AI report section into the email HTML
+    // Insert the AI report section just before the closing </table> of the main email
+    let enhancedHtml = baseHtml;
+    const closingTableTag = "</table>\n           </td>\n         </tr>\n       </table>\n     </body>";
+    const insertionPoint = enhancedHtml.lastIndexOf("</table>");
+    if (insertionPoint > -1) {
+      // Find the third-to-last </table> to insert before the footer area
+      const tables = [...enhancedHtml.matchAll(/<\/table>/g)];
+      // Insert before the second-to-last </table> (main content table)
+      const insertIdx = tables.length >= 3 ? tables[tables.length - 3].index : insertionPoint;
+      enhancedHtml =
+        enhancedHtml.slice(0, insertIdx) +
+        aiReportHtml +
+        enhancedHtml.slice(insertIdx);
+    }
+
+    // Step 4: Enhance the text version
+    let enhancedText = baseText;
+    if (aiResult.report && aiResult.report.executiveSummary) {
+      enhancedText += "\n\n--- AI POSTURE ANALYSIS ---\n";
+      enhancedText += aiResult.report.executiveSummary + "\n";
+      if (aiResult.report.exerciseRecommendations) {
+        enhancedText += "\nRecommended Exercises:\n";
+        for (const ex of aiResult.report.exerciseRecommendations) {
+          enhancedText += `  - ${ex.name}: ${ex.description} (${ex.duration})\n`;
+        }
+      }
+      if (aiResult.report.actionableInsights) {
+        enhancedText += "\nPersonalized Tips:\n";
+        for (const tip of aiResult.report.actionableInsights) {
+          enhancedText += `  - ${tip}\n`;
+        }
+      }
+    }
+
+    // Step 5: Send the enhanced email
+    const enhancedSubject = subject.replace(
+      "Daily Posture Report",
+      "AI-Enhanced Posture Report"
+    );
+
+    const info = await sendMail({
+      to,
+      subject: enhancedSubject,
+      html: enhancedHtml,
+      text: enhancedText,
+    });
+
+    if (info?.skipped) {
+      return res.status(202).json({
+        success: false,
+        message: "Email skipped (SMTP not configured)",
+      });
+    }
+
+    return res.json({
+      success: true,
+      messageId: info.messageId,
+      reportGenerated: true,
+    });
+  } catch (err) {
+    logger.error("AI email report failed:", err);
+    return res.status(500).json({
+      success: false,
+      message: "Failed to generate and send AI report: " + (err.message || "Unknown error"),
+    });
   }
 });
 

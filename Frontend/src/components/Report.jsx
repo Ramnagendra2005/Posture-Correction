@@ -7,7 +7,11 @@ import {
   PolarAngleAxis, PolarRadiusAxis, Radar
 } from 'recharts';
 import { Calendar, TrendingUp, AlertTriangle, Target, Clock, BarChart2, 
-         Activity, Award, Eye, Zap } from 'lucide-react';
+         Activity, Award, Eye, Zap, Brain, Send, Mail, RefreshCw, Timer,
+         ChevronUp, ChevronDown, Minus, Shield, Crosshair, Dumbbell,
+         Heart, Sparkles, ArrowUpRight, ArrowDownRight, BookOpen,
+         CheckCircle2, XCircle, MapPin, RotateCcw, Lightbulb,
+         TrendingDown, Gauge } from 'lucide-react';
 
 export default function Report() {
   // Color palette matching white and blue theme
@@ -49,6 +53,64 @@ export default function Report() {
   const { token } = useAuth();
   const [mailing, setMailing] = useState(false);
   const [mailStatus, setMailStatus] = useState(null); // { type: 'success'|'error', message }
+  const [aiReport, setAiReport] = useState(null);
+  const [aiReportLoading, setAiReportLoading] = useState(false);
+  const [aiReportError, setAiReportError] = useState(null);
+  const [aiEmailSending, setAiEmailSending] = useState(false);
+  const [aiEmailStatus, setAiEmailStatus] = useState(null);
+
+  const generateAiReport = async () => {
+    if (!token || aiReportLoading) return;
+    setAiReportLoading(true);
+    setAiReportError(null);
+    setAiReport(null);
+    try {
+      const resp = await fetch(`${API_BASE}/api/reports/generate-ai-report`, {
+        method: 'POST',
+        headers: {
+          'Authorization': `Bearer ${token}`,
+          'Content-Type': 'application/json'
+        }
+      });
+      const data = await resp.json().catch(() => ({}));
+      if (!resp.ok) {
+        throw new Error(data?.message || `Failed to generate AI report (HTTP ${resp.status})`);
+      }
+      setAiReport(data.report);
+    } catch (e) {
+      setAiReportError(e.message || 'Failed to generate AI report');
+    } finally {
+      setAiReportLoading(false);
+    }
+  };
+
+  const sendAiReportEmail = async () => {
+    if (!token || aiEmailSending) return;
+    setAiEmailSending(true);
+    setAiEmailStatus(null);
+    try {
+      const resp = await fetch(`${API_BASE}/api/reports/email-ai-report`, {
+        method: 'POST',
+        headers: {
+          'Authorization': `Bearer ${token}`,
+          'Content-Type': 'application/json'
+        }
+      });
+      const data = await resp.json().catch(() => ({}));
+      if (!resp.ok) {
+        throw new Error(data?.message || `Failed to send AI report email (HTTP ${resp.status})`);
+      }
+      if (data?.message === 'Email skipped (SMTP not configured)') {
+        setAiEmailStatus({ type: 'error', message: 'Email not configured on server (SMTP missing).' });
+      } else {
+        setAiEmailStatus({ type: 'success', message: 'AI-enhanced report emailed! Check your inbox.' });
+      }
+    } catch (e) {
+      setAiEmailStatus({ type: 'error', message: e.message || 'Failed to send AI report email' });
+    } finally {
+      setAiEmailSending(false);
+    }
+  };
 
   const sendReportEmail = async () => {
     if (!token || mailing) return;
@@ -358,7 +420,9 @@ export default function Report() {
     return (
       <div className="min-h-screen flex items-center justify-center bg-gradient-to-br from-[#ffffff] to-[#f8fafc]">
         <div className="flex flex-col items-center text-center max-w-md">
-          <div className="text-6xl mb-4">📊</div>
+          <div className="w-20 h-20 mx-auto mb-4 rounded-2xl bg-gradient-to-br from-blue-100 to-indigo-100 flex items-center justify-center">
+            <BarChart2 className="h-10 w-10 text-blue-500" />
+          </div>
           <h2 className="text-2xl font-bold text-[#1e293b] mb-2">Unable to Load Report</h2>
           <p className={`${colors.textSecondary} mb-6`}>
             We're having trouble fetching your posture data. Please check your connection and try again.
@@ -383,8 +447,24 @@ export default function Report() {
           <h1 className="text-3xl font-bold tracking-wide text-white">
             Posture Report
           </h1>
-          <div className="flex items-center gap-3">
+          <div className="flex items-center gap-3 flex-wrap">
             <p className="text-blue-100 hidden sm:block">An analysis of your posture health</p>
+            <button
+              onClick={generateAiReport}
+              disabled={aiReportLoading || !token}
+              className={`px-4 py-2 rounded-lg font-medium border transition-all ${aiReportLoading ? 'bg-white/30 text-white border-white/40 cursor-not-allowed animate-pulse' : 'bg-white text-[#2563eb] border-white hover:bg-blue-50 hover:shadow-lg'}`}
+              title="Generate an AI-powered comprehensive posture report"
+            >
+              {aiReportLoading ? <><RefreshCw className="h-4 w-4 mr-1.5 inline animate-spin" />Generating…</> : <><Brain className="h-4 w-4 mr-1.5 inline" />Generate AI Report</>}
+            </button>
+            <button
+              onClick={sendAiReportEmail}
+              disabled={aiEmailSending || !token}
+              className={`px-4 py-2 rounded-lg font-medium border transition-colors ${aiEmailSending ? 'bg-white/20 text-white border-white/30 cursor-not-allowed' : 'bg-white/10 hover:bg-white/20 text-white border-white/30'}`}
+              title="Generate AI report and email it to you"
+            >
+              {aiEmailSending ? <><RefreshCw className="h-4 w-4 mr-1.5 inline animate-spin" />Sending…</> : <><Mail className="h-4 w-4 mr-1.5 inline" />Email AI Report</>}
+            </button>
             <button
               onClick={sendReportEmail}
               disabled={mailing || !token}
@@ -405,11 +485,253 @@ export default function Report() {
         </div>
       )}
 
+      {aiEmailStatus && (
+        <div className="max-w-7xl mx-auto px-6 mt-4">
+          <div className={`rounded-lg p-3 border ${aiEmailStatus.type === 'success' ? 'bg-green-50 text-green-700 border-green-200' : 'bg-red-50 text-red-700 border-red-200'}`}>
+            {aiEmailStatus.message}
+          </div>
+        </div>
+      )}
+
+      {/* AI Report Section */}
+      {(aiReport || aiReportLoading || aiReportError) && (
+        <div className="max-w-7xl mx-auto px-6 mt-6">
+          <section className="space-y-6">
+            {/* AI Report Loading */}
+            {aiReportLoading && (
+              <div className="bg-gradient-to-r from-blue-50 to-indigo-50 rounded-2xl p-8 border border-blue-200 shadow-lg">
+                <div className="flex flex-col items-center justify-center py-8">
+                  <div className="relative mb-6">
+                    <div className="w-16 h-16 rounded-full border-4 border-blue-200 border-t-blue-600 animate-spin"></div>
+                    <div className="absolute inset-0 flex items-center justify-center"><Brain className="h-7 w-7 text-blue-600" /></div>
+                  </div>
+                  <h3 className="text-xl font-bold text-blue-900 mb-2">AI is Analyzing Your Posture Data...</h3>
+                  <p className="text-blue-600 text-sm">Fetching sessions, computing trends, generating insights & exercise recommendations</p>
+                  <div className="flex gap-2 mt-4">
+                    {['Fetching data', 'Analyzing patterns', 'Generating insights', 'Building exercises'].map((step, i) => (
+                      <span key={i} className="px-3 py-1 bg-blue-100 text-blue-700 rounded-full text-xs font-medium animate-pulse" style={{ animationDelay: `${i * 0.3}s` }}>
+                        {step}
+                      </span>
+                    ))}
+                  </div>
+                </div>
+              </div>
+            )}
+
+            {/* AI Report Error */}
+            {aiReportError && (
+              <div className="bg-red-50 rounded-2xl p-6 border border-red-200">
+                <div className="flex items-center gap-3 mb-2">
+                  <AlertTriangle className="h-6 w-6 text-red-500" />
+                  <h3 className="text-lg font-bold text-red-800">AI Report Generation Failed</h3>
+                </div>
+                <p className="text-red-600 text-sm">{aiReportError}</p>
+                <button onClick={generateAiReport} className="mt-3 px-4 py-2 bg-red-100 hover:bg-red-200 text-red-700 rounded-lg text-sm font-medium transition-colors">
+                  Try Again
+                </button>
+              </div>
+            )}
+
+            {/* AI Report Content */}
+            {aiReport && !aiReportLoading && (
+              <div className="space-y-6">
+                {/* Executive Summary Banner */}
+                <div className="bg-gradient-to-r from-blue-600 to-indigo-600 rounded-2xl p-6 text-white shadow-xl">
+                  <div className="flex items-center gap-3 mb-3">
+                    <div className="w-10 h-10 rounded-xl bg-white/20 flex items-center justify-center">
+                      <Brain className="h-6 w-6 text-white" />
+                    </div>
+                    <div>
+                      <h2 className="text-2xl font-bold">AI Posture Health Report</h2>
+                      <p className="text-blue-200 text-sm">Personalized analysis powered by AI</p>
+                    </div>
+                    <div className="ml-auto">
+                      <span className={`px-4 py-2 rounded-full text-sm font-bold ${
+                        aiReport.overallAssessment === 'excellent' ? 'bg-green-400/20 text-green-100' :
+                        aiReport.overallAssessment === 'good' ? 'bg-blue-400/20 text-blue-100' :
+                        aiReport.overallAssessment === 'needs_attention' ? 'bg-yellow-400/20 text-yellow-100' :
+                        'bg-red-400/20 text-red-100'
+                      }`}>
+                        {aiReport.overallAssessment === 'excellent' ? <><Sparkles className="h-4 w-4 inline mr-1" />Excellent</> :
+                         aiReport.overallAssessment === 'good' ? <><CheckCircle2 className="h-4 w-4 inline mr-1" />Good</> :
+                         aiReport.overallAssessment === 'needs_attention' ? <><AlertTriangle className="h-4 w-4 inline mr-1" />Needs Attention</> :
+                         aiReport.overallAssessment === 'critical' ? <><XCircle className="h-4 w-4 inline mr-1" />Critical</> : <><Gauge className="h-4 w-4 inline mr-1" />Assessment</>}
+                      </span>
+                    </div>
+                  </div>
+                  <p className="text-blue-100 leading-relaxed">{aiReport.executiveSummary}</p>
+                </div>
+
+                {/* Score Breakdown Cards */}
+                {aiReport.scoreBreakdown && (
+                  <div className="grid grid-cols-1 md:grid-cols-4 gap-4">
+                    {[
+                      { key: 'overall', label: 'Overall', Icon: Gauge, data: aiReport.scoreBreakdown.overall },
+                      { key: 'head', label: 'Head Position', Icon: Crosshair, data: aiReport.scoreBreakdown.headPosition },
+                      { key: 'shoulder', label: 'Shoulders', Icon: Shield, data: aiReport.scoreBreakdown.shoulderAlignment },
+                      { key: 'spine', label: 'Spine', Icon: Activity, data: aiReport.scoreBreakdown.spinalPosture },
+                    ].map(({ key, label, Icon, data }) => (
+                      <div key={key} className="bg-white rounded-xl p-5 border border-gray-200 shadow-sm hover:shadow-md transition-all duration-200">
+                        <div className="flex items-center gap-2 mb-3">
+                          <div className="w-8 h-8 rounded-lg bg-blue-50 flex items-center justify-center">
+                            <Icon className="h-4 w-4 text-blue-500" />
+                          </div>
+                          <span className="text-sm font-medium text-gray-500">{label}</span>
+                        </div>
+                        <div className={`text-3xl font-bold ${
+                          (data?.score || 0) >= 85 ? 'text-green-600' :
+                          (data?.score || 0) >= 70 ? 'text-yellow-600' :
+                          'text-red-600'
+                        }`}>
+                          {data?.score || 0}<span className="text-lg text-gray-400">/100</span>
+                        </div>
+                        <p className="text-xs text-gray-500 mt-1">{data?.interpretation || ''}</p>
+                        {data?.risk && <p className="text-xs text-red-500 mt-1">Risk: {data.risk}</p>}
+                      </div>
+                    ))}
+                  </div>
+                )}
+
+                {/* Trend Analysis */}
+                {aiReport.trendAnalysis && (
+                  <div className="bg-white rounded-xl p-6 border border-gray-200 shadow-sm">
+                    <h3 className="text-lg font-bold text-gray-800 flex items-center gap-2 mb-3">
+                      <TrendingUp className="h-5 w-5 text-blue-500" />
+                      Trend Analysis
+                    </h3>
+                    <div className="flex items-center gap-4 mb-3">
+                      <span className={`px-3 py-1 rounded-full text-sm font-medium ${
+                        aiReport.trendAnalysis.direction === 'improving' ? 'bg-green-100 text-green-700' :
+                        aiReport.trendAnalysis.direction === 'declining' ? 'bg-red-100 text-red-700' :
+                        'bg-gray-100 text-gray-700'
+                      }`}>
+                        {aiReport.trendAnalysis.direction === 'improving' ? <><ArrowUpRight className="h-3.5 w-3.5 inline mr-1" />Improving</> :
+                         aiReport.trendAnalysis.direction === 'declining' ? <><ArrowDownRight className="h-3.5 w-3.5 inline mr-1" />Declining</> :
+                         <><Minus className="h-3.5 w-3.5 inline mr-1" />Stable</>}
+                      </span>
+                      {aiReport.trendAnalysis.weekOverWeekChange && (
+                        <span className="text-sm text-gray-500">{aiReport.trendAnalysis.weekOverWeekChange}</span>
+                      )}
+                    </div>
+                    <p className="text-gray-600 text-sm">{aiReport.trendAnalysis.summary}</p>
+                  </div>
+                )}
+
+                {/* Posture Flaws */}
+                {aiReport.postureFlaws && aiReport.postureFlaws.length > 0 && (
+                  <div className="bg-white rounded-xl p-6 border border-gray-200 shadow-sm">
+                    <h3 className="text-lg font-bold text-gray-800 flex items-center gap-2 mb-4">
+                      <AlertTriangle className="h-5 w-5 text-amber-500" />
+                      Detected Posture Issues
+                    </h3>
+                    <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                      {aiReport.postureFlaws.map((flaw, i) => (
+                        <div key={i} className={`rounded-lg p-4 border-l-4 ${
+                          flaw.severity === 'severe' ? 'bg-red-50 border-red-500' :
+                          flaw.severity === 'moderate' ? 'bg-amber-50 border-amber-500' :
+                          'bg-green-50 border-green-500'
+                        }`}>
+                          <div className="flex items-center justify-between mb-1">
+                            <span className="font-semibold text-gray-800 text-sm">{flaw.flaw}</span>
+                            <span className={`text-xs px-2 py-0.5 rounded-full font-medium ${
+                              flaw.severity === 'severe' ? 'bg-red-200 text-red-800' :
+                              flaw.severity === 'moderate' ? 'bg-amber-200 text-amber-800' :
+                              'bg-green-200 text-green-800'
+                            }`}>{flaw.severity}</span>
+                          </div>
+                          {flaw.frequency && <p className="text-xs text-gray-500 mb-1">Frequency: {flaw.frequency}</p>}
+                          <p className="text-xs text-gray-600 mb-1">{flaw.healthRisk}</p>
+                          <p className="text-xs text-blue-700 font-medium">→ {flaw.immediateAction}</p>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                )}
+
+                {/* Exercise Recommendations */}
+                {aiReport.exerciseRecommendations && aiReport.exerciseRecommendations.length > 0 && (
+                  <div className="bg-white rounded-xl p-6 border border-gray-200 shadow-sm">
+                    <h3 className="text-lg font-bold text-gray-800 flex items-center gap-2 mb-2">
+                      <Activity className="h-5 w-5 text-green-500" />
+                      Exercise Recommendations
+                    </h3>
+                    <p className="text-sm text-gray-500 mb-4">Personalized exercises based on your posture patterns to prevent chronic pain</p>
+                    <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
+                      {aiReport.exerciseRecommendations.map((ex, i) => (
+                        <div key={i} className="bg-gradient-to-br from-green-50 to-emerald-50 rounded-xl p-5 border border-green-200 hover:shadow-md transition-shadow">
+                          <div className="flex items-start justify-between mb-2">
+                            <h4 className="font-bold text-green-800 text-sm">{ex.name}</h4>
+                            <span className={`text-xs px-2 py-0.5 rounded-full ${
+                              ex.difficulty === 'beginner' ? 'bg-green-200 text-green-800' :
+                              ex.difficulty === 'intermediate' ? 'bg-blue-200 text-blue-800' :
+                              'bg-purple-200 text-purple-800'
+                            }`}>{ex.difficulty}</span>
+                          </div>
+                          <p className="text-xs text-gray-600 mb-3 leading-relaxed">{ex.description}</p>
+                          <div className="flex flex-wrap gap-2 mb-3">
+                            <span className="text-xs bg-white px-2 py-1 rounded-md text-gray-600 border inline-flex items-center gap-1"><Timer className="h-3 w-3" />{ex.duration}</span>
+                            <span className="text-xs bg-white px-2 py-1 rounded-md text-gray-600 border inline-flex items-center gap-1"><MapPin className="h-3 w-3" />{ex.targetArea}</span>
+                            <span className="text-xs bg-white px-2 py-1 rounded-md text-gray-600 border inline-flex items-center gap-1"><RotateCcw className="h-3 w-3" />{ex.frequency}</span>
+                          </div>
+                          <div className="bg-green-100 rounded-lg p-2">
+                            <p className="text-xs text-green-800 flex items-start gap-1"><Lightbulb className="h-3 w-3 mt-0.5 flex-shrink-0" />{ex.benefitExplanation}</p>
+                          </div>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                )}
+
+                {/* Actionable Insights */}
+                {aiReport.actionableInsights && aiReport.actionableInsights.length > 0 && (
+                  <div className="bg-white rounded-xl p-6 border border-gray-200 shadow-sm">
+                    <h3 className="text-lg font-bold text-gray-800 flex items-center gap-2 mb-4">
+                      <Target className="h-5 w-5 text-blue-500" />
+                      Personalized Action Plan
+                    </h3>
+                    <div className="space-y-3">
+                      {aiReport.actionableInsights.map((insight, i) => (
+                        <div key={i} className="flex items-start gap-3 p-3 bg-blue-50 rounded-lg">
+                          <span className="flex-shrink-0 w-6 h-6 bg-blue-600 text-white rounded-full flex items-center justify-center text-xs font-bold">{i + 1}</span>
+                          <p className="text-sm text-gray-700">{insight}</p>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                )}
+
+                {/* Daily Routine + Motivation */}
+                <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                  {aiReport.dailyRoutineSuggestion && (
+                    <div className="bg-gradient-to-br from-indigo-50 to-purple-50 rounded-xl p-5 border border-indigo-200">
+                      <h4 className="font-bold text-indigo-800 flex items-center gap-2 mb-2">
+                        <Clock className="h-4 w-4" /> Daily Routine Suggestion
+                      </h4>
+                      <p className="text-sm text-indigo-700">{aiReport.dailyRoutineSuggestion}</p>
+                    </div>
+                  )}
+                  {aiReport.motivationalNote && (
+                    <div className="bg-gradient-to-br from-amber-50 to-yellow-50 rounded-xl p-5 border border-amber-200">
+                      <h4 className="font-bold text-amber-800 flex items-center gap-2 mb-2">
+                        <Award className="h-4 w-4" /> Motivation
+                      </h4>
+                      <p className="text-sm text-amber-700">{aiReport.motivationalNote}</p>
+                    </div>
+                  )}
+                </div>
+              </div>
+            )}
+          </section>
+        </div>
+      )}
+
       <main className="max-w-7xl mx-auto px-6 py-8 space-y-12">
         {/* Empty State - when user has no session data */}
         {(!reportData || (reportData.todaySessions === 0 && reportData.totalSessions === 0)) && (
           <div className="text-center py-16">
-            <div className="text-8xl mb-6">📈</div>
+            <div className="w-24 h-24 mx-auto mb-6 rounded-3xl bg-gradient-to-br from-blue-100 to-indigo-100 flex items-center justify-center">
+              <TrendingUp className="h-12 w-12 text-blue-500" />
+            </div>
             <h2 className="text-3xl font-bold text-[#1e293b] mb-4">No Posture Data Yet</h2>
             <p className={`${colors.textSecondary} text-lg mb-8 max-w-2xl mx-auto`}>
               Start your first posture analysis session to see detailed reports and insights about your posture health.
@@ -419,7 +741,7 @@ export default function Report() {
                 onClick={() => window.location.href = '/analysis'}
                 className="bg-[#3b82f6] hover:bg-[#2563eb] text-white px-8 py-3 rounded-lg font-medium transition-colors inline-flex items-center"
               >
-                <span className="mr-2">🚀</span>
+                <ArrowUpRight className="h-4 w-4 mr-2 inline" />
                 Start Analysis Session
               </button>
               <button 
@@ -456,22 +778,22 @@ export default function Report() {
             <h2 className={`text-xl font-semibold mb-4 ${colors.textSecondary}`}>Today's Summary</h2>
             <div className="grid grid-cols-2 gap-4">
               <StatCard
-                icon="⏱️"
+                icon={<Timer className="h-5 w-5" />}
                 title="Time Tracked"
                 value={formatMinutes(reportData?.todayMinutes || 0)}
               />
               <StatCard
-                icon="📊"
+                icon={<BarChart2 className="h-5 w-5" />}
                 title="Today's Sessions"
                 value={reportData?.todaySessions || 0}
               />
               <StatCard
-                icon="⚠️"
+                icon={<AlertTriangle className="h-5 w-5" />}
                 title="Today's Corrections"
                 value={reportData?.todayCorrections ?? reportData?.totalCorrections ?? 0}
               />
               <StatCard
-                icon="🎯"
+                icon={<Target className="h-5 w-5" />}
                 title="Today's Avg Score"
                 value={`${reportData?.todayAvgScore ?? postureScoreBreakdown.overall}%`}
               />
@@ -483,17 +805,17 @@ export default function Report() {
             <h2 className={`text-xl font-semibold mb-4 ${colors.textSecondary}`}>All-Time Summary</h2>
             <div className="grid grid-cols-2 gap-4">
               <StatCard
-                icon="🕐"
+                icon={<Clock className="h-5 w-5" />}
                 title="Total Time Tracked"
                 value={reportData?.cumulativeTimeFormatted || "0:00:00"}
               />
               <StatCard
-                icon="📊"
+                icon={<BarChart2 className="h-5 w-5" />}
                 title="Total corrections"
                 value={reportData?.allTimeCorrections ?? reportData?.totalCorrections ?? 0}
               />
               <StatCard
-                icon="🎯"
+                icon={<Target className="h-5 w-5" />}
                 title="Average Score"
                 value={`${reportData?.averageScore || 0}%`}
               />

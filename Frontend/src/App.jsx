@@ -18,14 +18,11 @@ const ProtectedRoute = ({ children }) => {
 
   if (loading) {
     return (
-      <div style={{ 
-        display: 'flex', 
-        justifyContent: 'center', 
-        alignItems: 'center', 
-        height: '100vh',
-        fontSize: '18px'
-      }}>
-        Loading...
+      <div className="min-h-screen flex flex-col items-center justify-center bg-gradient-to-br from-white to-blue-50">
+        <div className="relative mb-6">
+          <div className="w-12 h-12 rounded-full border-[3px] border-blue-100 border-t-blue-500 animate-spin"></div>
+        </div>
+        <p className="text-sm font-medium text-gray-400 tracking-wide">Loading</p>
       </div>
     );
   }
@@ -44,14 +41,11 @@ const PublicRoute = ({ children }) => {
 
   if (loading) {
     return (
-      <div style={{ 
-        display: 'flex', 
-        justifyContent: 'center', 
-        alignItems: 'center', 
-        height: '100vh',
-        fontSize: '18px'
-      }}>
-        Loading...
+      <div className="min-h-screen flex flex-col items-center justify-center bg-gradient-to-br from-white to-blue-50">
+        <div className="relative mb-6">
+          <div className="w-12 h-12 rounded-full border-[3px] border-blue-100 border-t-blue-500 animate-spin"></div>
+        </div>
+        <p className="text-sm font-medium text-gray-400 tracking-wide">Loading</p>
       </div>
     );
   }

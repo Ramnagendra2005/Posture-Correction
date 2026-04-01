@@ -257,11 +257,13 @@ const ChatBot = () => {
       const data = await response.json();
       console.log("Response data:", data);
       
+      const personalizedPrefix = data.personalized ? '<div style="display:inline-block;background:#e8f5e9;color:#2e7d32;padding:2px 8px;border-radius:12px;font-size:10px;font-weight:700;margin-bottom:6px;">✨ Personalized</div><br/>' : '';
+      
       setMessages((prev) => [
         ...prev,
         {
           sender: "bot",
-          text: formatMessage(data.response || "Sorry, I couldn't process that request."),
+          text: formatMessage(personalizedPrefix + (data.response || "Sorry, I couldn't process that request.")),
           timestamp: getCurrentTime(),
         },
       ]);
@@ -466,7 +468,7 @@ const ChatBot = () => {
                     animate={{ opacity: [1, 0.5, 1] }}
                     transition={{ duration: 1.5, repeat: Infinity }}
                   />
-                  <span className="text-xs text-blue-100">Smart Analysis Active</span>
+                  <span className="text-xs text-blue-100">AI Agent Active • Personalized</span>
                 </motion.div>
               </div>
               {isClicked && (
@@ -508,7 +510,7 @@ const ChatBot = () => {
                   }}
                   transition={{ duration: 2, repeat: Infinity }}
                 >
-                  Posture Assistant v2.0 • Ready to Help
+                  Posture AI Agent v3.0 • Personalized Insights
                 </motion.span>
               </motion.div>
               
@@ -598,7 +600,7 @@ const ChatBot = () => {
                       />
                     ))}
                   </div>
-                  <span className="text-xs text-[#4285f4] font-medium">Analyzing posture data...</span>
+                  <span className="text-xs text-[#4285f4] font-medium">AI Agent analyzing your data...</span>
                 </motion.div>
               )}
               <div ref={messagesEndRef} />

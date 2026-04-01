@@ -48,12 +48,10 @@ const Navbar = () => {
     );
   };
 
-  const getUserProfileImage = () => {
-    if (!user || profileImageError) return "/default-avatar.png";
-    return "/default-avatar.png";
+  const getUserInitial = () => {
+    const name = getUserDisplayName();
+    return name.charAt(0).toUpperCase();
   };
-
-  const handleImageError = () => setProfileImageError(true);
   
 
   return (
@@ -167,13 +165,13 @@ const Navbar = () => {
           justify-content: center;
           transition: border 0.18s, box-shadow 0.17s;
         }
-        .avatar img {
-          width: 100%; height: 100%; object-fit: cover;
-          display: block;
+        .avatar svg {
+          width: 20px; height: 20px;
         }
         .avatar:hover, .avatar:focus {
           border-color: ${ACCENT};
-          box-shadow: 0 0 12px ${ACCENT}88;
+          box-shadow: 0 0 0 3px ${ACCENT}22, 0 0 12px ${ACCENT}44;
+          transform: scale(1.05);
         }
         /* Transitions for Mobile */
         .mobile-menu {
@@ -235,11 +233,10 @@ const Navbar = () => {
             {user ? (
               <div className="flex items-center gap-3">
                 <div className="avatar" tabIndex={0}>
-                  <img
-                    src={getUserProfileImage()}
-                    alt="Profile"
-                    onError={handleImageError}
-                  />
+                  <svg viewBox="0 0 24 24" fill="none" stroke={ACCENT} strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
+                    <path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2" />
+                    <circle cx="12" cy="7" r="4" />
+                  </svg>
                 </div>
                 <span 
                   style={{
@@ -329,11 +326,10 @@ const Navbar = () => {
             {user ? (
               <div className="flex flex-col items-center space-y-4">
                 <div className="avatar" tabIndex={0} style={{ width: 52, height: 52 }}>
-                  <img
-                    src={getUserProfileImage()}
-                    alt="Profile"
-                    onError={handleImageError}
-                  />
+                  <svg viewBox="0 0 24 24" fill="none" stroke={ACCENT} strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" style={{ width: 28, height: 28 }}>
+                    <path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2" />
+                    <circle cx="12" cy="7" r="4" />
+                  </svg>
                 </div>
                 <span className="font-semibold text-lg" style={{ letterSpacing: ".014em", color: TEXT_DARK }}>
                   {getUserDisplayName()}

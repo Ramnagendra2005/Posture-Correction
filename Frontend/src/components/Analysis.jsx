@@ -681,6 +681,60 @@ const Analysis = () => {
     }
   }, [user, token, checkCameraStatus, isSessionActive]);
 
+  // CRITICAL: Stop analysis when component unmounts (user navigates away)
+  useEffect(() => {
+    return () => {
+      // Only clean up if a session is actually active
+      if (!isSessionActiveRef.current) return;
+
+      console.log('[Analysis] Component unmounting — stopping active session');
+
+      // Capture final values before cleanup
+      const finalSessionSeconds = elapsedTimeRef.current;
+      const finalScores = latestScoresRef.current;
+      const finalCorrections = latestCorrectionsRef.current;
+
+      // Stop the Python analysis service (fire-and-forget)
+      fetch('http://localhost:5001/stop_analysis', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+      }).catch((err) => console.error('[Analysis] Failed to stop Python service:', err));
+
+      // Stop the backend session and save data (fire-and-forget)
+      if (token) {
+        fetch(`${API_BASE}/api/sessions/stop`, {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            Authorization: `Bearer ${token}`,
+          },
+          body: JSON.stringify({
+            sessionDuration: finalSessionSeconds,
+            finalScores,
+          }),
+        }).catch((err) => console.error('[Analysis] Failed to stop backend session:', err));
+
+        // Final realtime update
+        fetch(`${API_BASE}/api/posture/update-realtime`, {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            Authorization: `Bearer ${token}`,
+          },
+          body: JSON.stringify({
+            user_id: user?.id,
+            session_id: backendSessionIdRef.current,
+            scores: finalScores,
+            feedback: finalCorrections,
+            timestamp: new Date().toISOString(),
+            duration_seconds: finalSessionSeconds,
+          }),
+        }).catch((err) => console.error('[Analysis] Failed final realtime update:', err));
+      }
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
   // Animation variants
   const containerVariants = {
     hidden: { opacity: 0 },
