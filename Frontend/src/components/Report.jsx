@@ -53,6 +53,8 @@ export default function Report() {
   const { token } = useAuth();
   const [mailing, setMailing] = useState(false);
   const [mailStatus, setMailStatus] = useState(null); // { type: 'success'|'error', message }
+  const [weeklyMailing, setWeeklyMailing] = useState(false);
+  const [weeklyMailStatus, setWeeklyMailStatus] = useState(null);
   const [aiReport, setAiReport] = useState(null);
   const [aiReportLoading, setAiReportLoading] = useState(false);
   const [aiReportError, setAiReportError] = useState(null);
@@ -161,6 +163,34 @@ export default function Report() {
       setMailStatus({ type: 'error', message: e.message || 'Failed to send email' });
     } finally {
       setMailing(false);
+    }
+  };
+
+  const sendWeeklyReportEmail = async () => {
+    if (!token || weeklyMailing) return;
+    setWeeklyMailing(true);
+    setWeeklyMailStatus(null);
+    try {
+      const resp = await fetch(`${API_BASE}/api/reports/send-weekly-email`, {
+        method: 'POST',
+        headers: {
+          'Authorization': `Bearer ${token}`,
+          'Content-Type': 'application/json'
+        }
+      });
+      const data = await resp.json().catch(() => ({}));
+      if (!resp.ok) {
+        throw new Error(data?.message || `Failed to send weekly email (HTTP ${resp.status})`);
+      }
+      if (data?.message === 'Email skipped (SMTP not configured)') {
+        setWeeklyMailStatus({ type: 'error', message: 'Email not configured on server (SMTP missing).' });
+      } else {
+        setWeeklyMailStatus({ type: 'success', message: 'AI-enhanced weekly report emailed! Check your inbox.' });
+      }
+    } catch (e) {
+      setWeeklyMailStatus({ type: 'error', message: e.message || 'Failed to send weekly email' });
+    } finally {
+      setWeeklyMailing(false);
     }
   };
 
@@ -495,7 +525,15 @@ export default function Report() {
               className={`px-4 py-2 rounded-lg font-medium border transition-colors ${mailing ? 'bg-white/20 text-white border-white/30 cursor-not-allowed' : 'bg-white/10 hover:bg-white/20 text-white border-white/30'}`}
               title={!token ? 'Sign in to email your report' : 'Email today\'s report to me'}
             >
-              {mailing ? 'Sending…' : 'Email today\'s report'}
+              {mailing ? <><RefreshCw className="h-4 w-4 mr-1.5 inline animate-spin" />Sending…</> : <><Mail className="h-4 w-4 mr-1.5 inline" />Mail Daily Report</>}
+            </button>
+            <button
+              onClick={sendWeeklyReportEmail}
+              disabled={weeklyMailing || !token}
+              className={`px-4 py-2 rounded-lg font-medium border transition-all ${weeklyMailing ? 'bg-white/30 text-white border-white/40 cursor-not-allowed animate-pulse' : 'bg-white/10 hover:bg-white/20 text-white border-white/30'}`}
+              title={!token ? 'Sign in to email your report' : 'Generate AI weekly report and email it to you'}
+            >
+              {weeklyMailing ? <><RefreshCw className="h-4 w-4 mr-1.5 inline animate-spin" />Generating…</> : <><Calendar className="h-4 w-4 mr-1.5 inline" />Mail Weekly Report</>}
             </button>
           </div>
         </div>
@@ -505,6 +543,14 @@ export default function Report() {
         <div className="max-w-7xl mx-auto px-6 mt-4">
           <div className={`rounded-lg p-3 border ${mailStatus.type === 'success' ? 'bg-green-50 text-green-700 border-green-200' : 'bg-red-50 text-red-700 border-red-200'}`}>
             {mailStatus.message}
+          </div>
+        </div>
+      )}
+
+      {weeklyMailStatus && (
+        <div className="max-w-7xl mx-auto px-6 mt-4">
+          <div className={`rounded-lg p-3 border ${weeklyMailStatus.type === 'success' ? 'bg-green-50 text-green-700 border-green-200' : 'bg-red-50 text-red-700 border-red-200'}`}>
+            {weeklyMailStatus.message}
           </div>
         </div>
       )}

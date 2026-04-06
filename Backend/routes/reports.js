@@ -2,8 +2,9 @@ const express = require("express");
 const { query, validationResult } = require("express-validator");
 const { PostureSession, PosturePattern, DailySummary, TrackedTime, GeneratedReport } = require("../models");
 const { buildDailyEmail } = require("../services/dailyReportService");
+const { buildWeeklyEmail } = require("../services/weeklyReportService");
 const { sendMail } = require("../services/emailService");
-const { generatePostureReport, renderReportAsEmailHtml } = require("../services/reportAgentService");
+const { generatePostureReport, generateWeeklyPostureReport, renderReportAsEmailHtml, renderWeeklyReportAsEmailHtml } = require("../services/reportAgentService");
 const logger = require("../utils/logger");
 
 const router = express.Router();
@@ -36,6 +37,99 @@ router.post("/send-daily-email", async (req, res) => {
   } catch (err) {
     logger.error("Failed to send daily email:", err);
     return res.status(500).json({ success: false, message: err.message });
+  }
+});
+
+// Send AI-generated weekly report email to the authenticated user
+router.post("/send-weekly-email", async (req, res) => {
+  try {
+    const userId = req.userId;
+    logger.info(`AI weekly email report requested by user ${userId}`);
+
+    // Check if Gemini API key is configured
+    if (
+      !process.env.GEMINI_API_KEY ||
+      process.env.GEMINI_API_KEY === "your_gemini_api_key_here"
+    ) {
+      return res.status(503).json({
+        success: false,
+        message: "AI weekly report generation is not available. Please configure GEMINI_API_KEY.",
+      });
+    }
+
+    // Step 1: Generate the AI weekly report via Gemini
+    const aiResult = await generateWeeklyPostureReport(userId);
+    const aiReportHtml = renderWeeklyReportAsEmailHtml(aiResult.report);
+
+    // Step 2: Build the standard weekly email (data-driven base)
+    const { to, subject, html: baseHtml, text: baseText } = await buildWeeklyEmail(userId);
+
+    // Step 3: Inject AI report section into the weekly email HTML
+    let enhancedHtml = baseHtml;
+    const insertionPoint = enhancedHtml.lastIndexOf("</table>");
+    if (insertionPoint > -1) {
+      const tables = [...enhancedHtml.matchAll(/<\/table>/g)];
+      const insertIdx = tables.length >= 3 ? tables[tables.length - 3].index : insertionPoint;
+      enhancedHtml =
+        enhancedHtml.slice(0, insertIdx) +
+        aiReportHtml +
+        enhancedHtml.slice(insertIdx);
+    }
+
+    // Step 4: Enhance the text version with AI content
+    let enhancedText = baseText;
+    if (aiResult.report && aiResult.report.executiveSummary) {
+      enhancedText += "\n\n--- AI WEEKLY POSTURE ANALYSIS ---\n";
+      enhancedText += aiResult.report.executiveSummary + "\n";
+      if (aiResult.report.exerciseRecommendations) {
+        enhancedText += "\nRecommended Exercises:\n";
+        for (const ex of aiResult.report.exerciseRecommendations) {
+          enhancedText += `  - ${ex.name}: ${ex.description} (${ex.duration})\n`;
+        }
+      }
+      const actionPlan = aiResult.report.weeklyActionPlan || aiResult.report.actionableInsights;
+      if (actionPlan) {
+        enhancedText += "\nAction Plan for Next Week:\n";
+        for (const tip of actionPlan) {
+          enhancedText += `  - ${tip}\n`;
+        }
+      }
+      if (aiResult.report.weeklyProgress) {
+        enhancedText += `\nWeekly Progress: ${aiResult.report.weeklyProgress}\n`;
+      }
+    }
+
+    // Step 5: Send the enhanced email
+    const enhancedSubject = subject.replace(
+      "Weekly Posture Report",
+      "AI-Enhanced Weekly Posture Report"
+    );
+
+    const info = await sendMail({
+      to,
+      subject: enhancedSubject,
+      html: enhancedHtml,
+      text: enhancedText,
+    });
+
+    if (info?.skipped) {
+      return res.status(202).json({
+        success: false,
+        message: "Email skipped (SMTP not configured)",
+      });
+    }
+
+    return res.json({
+      success: true,
+      messageId: info.messageId,
+      reportGenerated: true,
+    });
+  } catch (err) {
+    logger.error("AI weekly email report failed:", err);
+    return res.status(500).json({
+      success: false,
+      message: "Failed to generate and send AI weekly report: " + (err.message || "Unknown error"),
+    });
   }
 });
 
