@@ -107,9 +107,11 @@ RESPONSE SCHEMA (JSON):
 
 CRITICAL RULES:
 - Use the ACTUAL user data provided below. Do not make up numbers.
-- If any score is 0, it means no data was recorded for that component.
+- The scoreBreakdown scores MUST EXACTLY MATCH the scores from the USER DATA section below. Copy them verbatim. Do NOT fabricate, round up, or approximate scores. If the user data says "Average Score: 28/100", then scoreBreakdown.overall.score MUST be 28. Generating a different number is a CRITICAL violation.
+- If any score is 0, it means no data was recorded for that component. Use 0 in your response.
+- The overallAssessment MUST reflect the actual overall score: >=85 = "excellent", >=70 = "good", >=50 = "needs_attention", <50 = "critical".
 - Provide at least 4-6 exercise recommendations targeting their weakest areas.
-- All insights must be personalized to their specific data.
+- All insights must be personalized to their specific data patterns.
 - Keep exercise descriptions clear and actionable (how to perform them).
 - The response must be VALID JSON only. No markdown formatting.
 - NEVER use emojis anywhere in your response. Use plain professional text only. No unicode emoji characters.
@@ -148,22 +150,52 @@ Generate the comprehensive posture health report now as valid JSON.`;
       }
     }
 
-    // Merge real scores from database (LLM might approximate)
-    if (reportJson.scoreBreakdown) {
-      const real = userData.today.sessions > 0 ? userData.today : userData.week;
-      if (real.avgScore > 0 && reportJson.scoreBreakdown.overall) {
-        reportJson.scoreBreakdown.overall.score = real.avgScore;
-      }
-      if (real.components.headTilt > 0 && reportJson.scoreBreakdown.headPosition) {
-        reportJson.scoreBreakdown.headPosition.score = real.components.headTilt;
-      }
-      if (real.components.shoulderAlignment > 0 && reportJson.scoreBreakdown.shoulderAlignment) {
-        reportJson.scoreBreakdown.shoulderAlignment.score = real.components.shoulderAlignment;
-      }
-      if (real.components.spinalPosture > 0 && reportJson.scoreBreakdown.spinalPosture) {
-        reportJson.scoreBreakdown.spinalPosture.score = real.components.spinalPosture;
-      }
+    // --- FORCE-OVERRIDE scores from real database data ---
+    // Use canonicalScores which are computed by the EXACT same function
+    // (computeCanonicalPostureScores) that the Report page uses.
+    const cs = userData.canonicalScores;
+    const realOverall = cs.overallScore;
+    const realHead = cs.neckScore;
+    const realShoulder = cs.shoulderScore;
+    const realSpine = cs.backScore;
+
+    logger.info(`[ReportAgent] Canonical scores (same as Report page) → overall: ${realOverall}, head: ${realHead}, shoulder: ${realShoulder}, spine: ${realSpine}`);
+
+    // Always override scoreBreakdown with real data
+    if (!reportJson.scoreBreakdown) {
+      reportJson.scoreBreakdown = {};
     }
+    if (!reportJson.scoreBreakdown.overall) {
+      reportJson.scoreBreakdown.overall = { score: 0, interpretation: "", trend: "" };
+    }
+    if (!reportJson.scoreBreakdown.headPosition) {
+      reportJson.scoreBreakdown.headPosition = { score: 0, interpretation: "", risk: "" };
+    }
+    if (!reportJson.scoreBreakdown.shoulderAlignment) {
+      reportJson.scoreBreakdown.shoulderAlignment = { score: 0, interpretation: "", risk: "" };
+    }
+    if (!reportJson.scoreBreakdown.spinalPosture) {
+      reportJson.scoreBreakdown.spinalPosture = { score: 0, interpretation: "", risk: "" };
+    }
+
+    // Force-set scores from DB — NEVER trust LLM-generated scores
+    reportJson.scoreBreakdown.overall.score = realOverall;
+    reportJson.scoreBreakdown.headPosition.score = realHead;
+    reportJson.scoreBreakdown.shoulderAlignment.score = realShoulder;
+    reportJson.scoreBreakdown.spinalPosture.score = realSpine;
+
+    // Re-derive overallAssessment from real score (LLM often gets this wrong)
+    if (realOverall >= 85) {
+      reportJson.overallAssessment = "excellent";
+    } else if (realOverall >= 70) {
+      reportJson.overallAssessment = "good";
+    } else if (realOverall >= 50) {
+      reportJson.overallAssessment = "needs_attention";
+    } else {
+      reportJson.overallAssessment = "critical";
+    }
+
+    logger.info(`[ReportAgent] Corrected overallAssessment to "${reportJson.overallAssessment}" based on canonical score ${realOverall}`);
 
     logger.info(`[ReportAgent] Report generated successfully in ${Date.now() - startTime}ms`);
 

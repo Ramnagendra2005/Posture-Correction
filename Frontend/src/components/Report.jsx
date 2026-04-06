@@ -56,14 +56,37 @@ export default function Report() {
   const [aiReport, setAiReport] = useState(null);
   const [aiReportLoading, setAiReportLoading] = useState(false);
   const [aiReportError, setAiReportError] = useState(null);
+  const [aiReportExpiresAt, setAiReportExpiresAt] = useState(null);
   const [aiEmailSending, setAiEmailSending] = useState(false);
   const [aiEmailStatus, setAiEmailStatus] = useState(null);
+
+  // Auto-load saved report from DB on page load
+  useEffect(() => {
+    const fetchSavedReport = async () => {
+      if (!token) return;
+      try {
+        const resp = await fetch(`${API_BASE}/api/reports/saved-report`, {
+          headers: { 'Authorization': `Bearer ${token}` }
+        });
+        const data = await resp.json().catch(() => ({}));
+        if (resp.ok && data.report) {
+          setAiReport(data.report);
+          setAiReportExpiresAt(data.expiresAt ? new Date(data.expiresAt) : null);
+        }
+      } catch (e) {
+        // Silent fail — user can still generate a new report
+        console.warn('Could not load saved AI report:', e.message);
+      }
+    };
+    fetchSavedReport();
+  }, [token]);
 
   const generateAiReport = async () => {
     if (!token || aiReportLoading) return;
     setAiReportLoading(true);
     setAiReportError(null);
     setAiReport(null);
+    setAiReportExpiresAt(null);
     try {
       const resp = await fetch(`${API_BASE}/api/reports/generate-ai-report`, {
         method: 'POST',
@@ -77,6 +100,7 @@ export default function Report() {
         throw new Error(data?.message || `Failed to generate AI report (HTTP ${resp.status})`);
       }
       setAiReport(data.report);
+      setAiReportExpiresAt(data.expiresAt ? new Date(data.expiresAt) : null);
     } catch (e) {
       setAiReportError(e.message || 'Failed to generate AI report');
     } finally {
@@ -545,7 +569,18 @@ export default function Report() {
                       <h2 className="text-2xl font-bold">AI Posture Health Report</h2>
                       <p className="text-blue-200 text-sm">Personalized analysis powered by AI</p>
                     </div>
-                    <div className="ml-auto">
+                    <div className="ml-auto flex items-center gap-2">
+                      {aiReportExpiresAt && (() => {
+                        const remaining = Math.max(0, aiReportExpiresAt.getTime() - Date.now());
+                        const hrs = Math.floor(remaining / (1000 * 60 * 60));
+                        const mins = Math.floor((remaining % (1000 * 60 * 60)) / (1000 * 60));
+                        return (
+                          <span className="px-3 py-1 rounded-full text-xs font-medium bg-white/15 text-blue-100 flex items-center gap-1">
+                            <Clock className="h-3 w-3" />
+                            {remaining <= 0 ? 'Expired' : `Expires in ${hrs}h ${mins}m`}
+                          </span>
+                        );
+                      })()}
                       <span className={`px-4 py-2 rounded-full text-sm font-bold ${
                         aiReport.overallAssessment === 'excellent' ? 'bg-green-400/20 text-green-100' :
                         aiReport.overallAssessment === 'good' ? 'bg-blue-400/20 text-blue-100' :

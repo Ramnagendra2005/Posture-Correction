@@ -384,6 +384,37 @@ const exerciseRecommendationSchema = new mongoose.Schema(
   { timestamps: true }
 );
 
+// Generated AI Report Schema (auto-expires after 6 hours)
+const generatedReportSchema = new mongoose.Schema(
+  {
+    userId: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: "User",
+      required: true,
+      index: true,
+    },
+    report: {
+      type: mongoose.Schema.Types.Mixed, // Full JSON report object from Gemini
+      required: true,
+    },
+    generatedAt: {
+      type: Date,
+      required: true,
+      default: Date.now,
+    },
+    expiresAt: {
+      type: Date,
+      required: true,
+      default: () => new Date(Date.now() + 6 * 60 * 60 * 1000), // 6 hours from now
+    },
+  },
+  { timestamps: true }
+);
+
+// TTL index — MongoDB will automatically delete documents once expiresAt is reached
+generatedReportSchema.index({ expiresAt: 1 }, { expireAfterSeconds: 0 });
+generatedReportSchema.index({ userId: 1, generatedAt: -1 });
+
 // Compound indexes for efficient date-based queries
 dailySummarySchema.index({ userId: 1, date: 1 }, { unique: true });
 posturePatternSchema.index({ userId: 1, timestamp: 1 });
@@ -399,4 +430,5 @@ module.exports = {
   DailySummary: mongoose.model("DailySummary", dailySummarySchema),
   TrackedTime: mongoose.model("TrackedTime", trackedTimeSchema),
   ExerciseRecommendation: mongoose.model("ExerciseRecommendation", exerciseRecommendationSchema),
+  GeneratedReport: mongoose.model("GeneratedReport", generatedReportSchema),
 };

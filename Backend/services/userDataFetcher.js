@@ -14,16 +14,14 @@ const {
 } = require("../models");
 const logger = require("../utils/logger");
 
-const clampScore = (v) => {
-  const n = Number(v);
-  return Number.isFinite(n) ? Math.max(0, Math.min(100, Math.round(n))) : 0;
-};
-
-const normalizeMinutes = (v) => {
-  const n = Number(v);
-  if (!Number.isFinite(n) || n <= 0) return 0;
-  return n > 1000 ? n / 60 : n;
-};
+const {
+  clampScore,
+  normalizeMinutes,
+  extractSessionScore,
+  averageScores,
+  hasRealSummaryData,
+  computeCanonicalPostureScores,
+} = require("../utils/scoringUtils");
 
 const formatMinutes = (mins) => {
   const safe = Math.max(0, Math.min(1440, Math.round(mins || 0)));
@@ -95,10 +93,29 @@ async function fetchUserPostureData(userId) {
   ]);
 
   // --- Process Today's Data ---
-  const todaySessionCount = todaySessions.length;
+  // Deduplicate sessions by deviceInfo.sessionId to avoid inflated averages
+  // from real-time update duplicates (same logic as analytics route)
+  const todaySessionMap = new Map();
+  for (const s of todaySessions) {
+    const key = s?.deviceInfo?.sessionId || String(s?._id);
+    const existing = todaySessionMap.get(key);
+    if (!existing) {
+      todaySessionMap.set(key, s);
+    } else {
+      // Keep the one with more data (longer duration or more recent update)
+      const existingDur = normalizeMinutes(existing?.duration || 0);
+      const nextDur = normalizeMinutes(s?.duration || 0);
+      if (nextDur >= existingDur) {
+        todaySessionMap.set(key, s);
+      }
+    }
+  }
+  const dedupedTodaySessions = Array.from(todaySessionMap.values());
+  const todaySessionCount = dedupedTodaySessions.length;
+
   const todayMinutesFromTracker =
     Math.max(0, Number(trackedTime?.todaysTimeTrackedSeconds || 0)) / 60;
-  const todayMinutesFromSessions = todaySessions.reduce((sum, s) => {
+  const todayMinutesFromSessions = dedupedTodaySessions.reduce((sum, s) => {
     if (s.startTime && s.endTime) {
       return (
         sum +
@@ -115,31 +132,37 @@ async function fetchUserPostureData(userId) {
       ? todayMinutesFromTracker
       : todayMinutesFromSessions;
 
-  const todayScores = todaySessions
+  const todayScores = dedupedTodaySessions
     .map((s) => clampScore(s.scores?.overallScore))
     .filter((v) => v > 0);
-  const todayAvgScore =
+  // Primary: use session-derived average; Fallback: use DailySummary average
+  const todayAvgScoreFromSessions =
     todayScores.length > 0
       ? Math.round(todayScores.reduce((a, b) => a + b, 0) / todayScores.length)
       : 0;
+  const todayAvgScoreFromSummary = clampScore(todaySummary?.averageScores?.overall);
+  const todayAvgScore = todayAvgScoreFromSessions > 0
+    ? todayAvgScoreFromSessions
+    : todayAvgScoreFromSummary;
+
   const todayBestScore =
     todayScores.length > 0 ? Math.max(...todayScores) : 0;
   const todayWorstScore =
     todayScores.length > 0 ? Math.min(...todayScores) : 0;
 
-  const todayCorrections = todaySessions.reduce(
+  const todayCorrections = dedupedTodaySessions.reduce(
     (sum, s) => sum + (s.postureMetrics?.totalCorrections || 0),
     0
   );
 
-  // Component scores for today
-  const todayHeadScores = todaySessions
+  // Component scores for today (from deduped sessions, with DailySummary fallback)
+  const todayHeadScores = dedupedTodaySessions
     .map((s) => clampScore(s.scores?.headTiltScore))
     .filter((v) => v > 0);
-  const todayShoulderScores = todaySessions
+  const todayShoulderScores = dedupedTodaySessions
     .map((s) => clampScore(s.scores?.shoulderAlignmentScore))
     .filter((v) => v > 0);
-  const todaySpineScores = todaySessions
+  const todaySpineScores = dedupedTodaySessions
     .map((s) => clampScore(s.scores?.spinalPostureScore))
     .filter((v) => v > 0);
 
@@ -149,9 +172,9 @@ async function fetchUserPostureData(userId) {
       : 0;
 
   const todayComponents = {
-    headTilt: avg(todayHeadScores),
-    shoulderAlignment: avg(todayShoulderScores),
-    spinalPosture: avg(todaySpineScores),
+    headTilt: avg(todayHeadScores) || clampScore(todaySummary?.averageScores?.headTilt),
+    shoulderAlignment: avg(todayShoulderScores) || clampScore(todaySummary?.averageScores?.shoulderAlignment),
+    spinalPosture: avg(todaySpineScores) || clampScore(todaySummary?.averageScores?.spinalPosture),
   };
 
   // --- Process Weekly Data ---
@@ -244,6 +267,17 @@ async function fetchUserPostureData(userId) {
     }))
     .sort((a, b) => a.hour - b.hour);
 
+  // === CANONICAL SCORES ===
+  // Use the EXACT same scoring function that the Report page's analytics
+  // endpoint uses.  This is the single source of truth.
+  const canonicalScores = computeCanonicalPostureScores({
+    todaySummary,
+    weekDailySummaries: weekSummaries,
+    weekSessions: dedupedTodaySessions.concat(weekSessions),
+  });
+
+  logger.info(`[UserDataFetcher] Canonical scores (same as Report page) → overall: ${canonicalScores.overallScore}, neck: ${canonicalScores.neckScore}, shoulder: ${canonicalScores.shoulderScore}, back: ${canonicalScores.backScore}`);
+
   // Build structured data
   const data = {
     user: {
@@ -251,24 +285,35 @@ async function fetchUserPostureData(userId) {
       email: user?.email || "",
       preferences: user?.preferences || {},
     },
+    // Canonical scores — AUTHORITATIVE, same as Report page
+    canonicalScores,
     today: {
       sessions: todaySessionCount,
       timeTracked: formatMinutes(todayMinutes),
       timeTrackedMinutes: Math.round(todayMinutes),
-      avgScore: todayAvgScore,
+      // Use canonical overall as the primary score (matches Report page)
+      avgScore: canonicalScores.overallScore,
       bestScore: todayBestScore,
       worstScore: todayWorstScore,
       corrections: todayCorrections,
-      components: todayComponents,
+      components: {
+        headTilt: canonicalScores.neckScore,
+        shoulderAlignment: canonicalScores.shoulderScore,
+        spinalPosture: canonicalScores.backScore,
+      },
       hourlyPattern,
     },
     week: {
       sessions: weekSessionCount,
       timeTracked: formatMinutes(weekMinutes),
       timeTrackedMinutes: Math.round(weekMinutes),
-      avgScore: weekAvgScore,
+      avgScore: canonicalScores.overallScore,
       corrections: weekCorrections,
-      components: weekComponents,
+      components: {
+        headTilt: canonicalScores.neckScore,
+        shoulderAlignment: canonicalScores.shoulderScore,
+        spinalPosture: canonicalScores.backScore,
+      },
       trend,
     },
     month: {
@@ -288,6 +333,9 @@ async function fetchUserPostureData(userId) {
 
   // Build text summary for LLM
   const textSummary = buildTextSummary(data);
+
+  // Debug: log the actual scores being sent to the AI
+  logger.info(`[UserDataFetcher] User ${userId} data summary → Today: sessions=${data.today.sessions}, avgScore=${data.today.avgScore}, head=${data.today.components.headTilt}, shoulder=${data.today.components.shoulderAlignment}, spine=${data.today.components.spinalPosture} | Week: sessions=${data.week.sessions}, avgScore=${data.week.avgScore}`);
 
   return { data, textSummary };
 }

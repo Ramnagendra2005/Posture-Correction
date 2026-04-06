@@ -1,6 +1,6 @@
 const express = require("express");
 const { query, validationResult } = require("express-validator");
-const { PostureSession, PosturePattern, DailySummary, TrackedTime } = require("../models");
+const { PostureSession, PosturePattern, DailySummary, TrackedTime, GeneratedReport } = require("../models");
 const { buildDailyEmail } = require("../services/dailyReportService");
 const { sendMail } = require("../services/emailService");
 const { generatePostureReport, renderReportAsEmailHtml } = require("../services/reportAgentService");
@@ -8,129 +8,16 @@ const logger = require("../utils/logger");
 
 const router = express.Router();
 
-const clampScore = (value) => {
-  const n = Number(value);
-  if (!Number.isFinite(n)) return 0;
-  return Math.max(0, Math.min(100, n));
-};
-
-const toDateKey = (value) => {
-  const d = new Date(value);
-  if (!Number.isFinite(d.getTime())) return null;
-  const y = d.getFullYear();
-  const m = String(d.getMonth() + 1).padStart(2, "0");
-  const day = String(d.getDate()).padStart(2, "0");
-  return `${y}-${m}-${day}`;
-};
-
-const extractSessionScore = (session, sessionKey) => {
-  const candidates = [
-    session?.scores?.[sessionKey],
-    session?.[sessionKey],
-  ];
-  for (const candidate of candidates) {
-    const n = Number(candidate);
-    if (Number.isFinite(n)) {
-      return clampScore(n);
-    }
-  }
-  return 0;
-};
-
-const averageScores = (values) => {
-  const valid = values
-    .map((v) => Number(v))
-    .filter((v) => Number.isFinite(v) && v >= 0 && v <= 100);
-  if (!valid.length) return 0;
-  return valid.reduce((sum, v) => sum + v, 0) / valid.length;
-};
-
-const hasRealSummaryData = (summary) => {
-  if (!summary) return false;
-  return (Number(summary.sessionsCount) || 0) > 0;
-};
-
-const pickComponentScore = ({ todaySummary, weekDailySummaries, weekSessions, summaryKey, sessionKey }) => {
-  if (hasRealSummaryData(todaySummary)) {
-    const todayValue = Number(todaySummary?.averageScores?.[summaryKey]);
-    if (Number.isFinite(todayValue) && todayValue > 0) {
-      return clampScore(todayValue);
-    }
-  }
-
-  const weeklySummaryValues = weekDailySummaries
-    .filter(hasRealSummaryData)
-    .map((s) => Number(s?.averageScores?.[summaryKey]))
-    .filter((v) => Number.isFinite(v) && v > 0);
-
-  if (weeklySummaryValues.length > 0) {
-    return clampScore(averageScores(weeklySummaryValues));
-  }
-
-  const weeklySessionValues = weekSessions
-    .map((s) => extractSessionScore(s, sessionKey))
-    .filter((v) => Number.isFinite(v) && v > 0);
-
-  if (weeklySessionValues.length > 0) {
-    return clampScore(averageScores(weeklySessionValues));
-  }
-
-  return 0;
-};
-
-const computeCanonicalPostureScores = ({ todaySummary, weekDailySummaries, weekSessions }) => {
-  const neckScore = Math.round(
-    pickComponentScore({
-      todaySummary,
-      weekDailySummaries,
-      weekSessions,
-      summaryKey: "headTilt",
-      sessionKey: "headTiltScore",
-    })
-  );
-
-  const shoulderScore = Math.round(
-    pickComponentScore({
-      todaySummary,
-      weekDailySummaries,
-      weekSessions,
-      summaryKey: "shoulderAlignment",
-      sessionKey: "shoulderAlignmentScore",
-    })
-  );
-
-  const backScore = Math.round(
-    pickComponentScore({
-      todaySummary,
-      weekDailySummaries,
-      weekSessions,
-      summaryKey: "spinalPosture",
-      sessionKey: "spinalPostureScore",
-    })
-  );
-
-  const overallScore = Math.round(
-    averageScores([neckScore, shoulderScore, backScore])
-  );
-
-  return {
-    neckScore,
-    shoulderScore,
-    backScore,
-    overallScore,
-    headTiltScore: neckScore,
-    shoulderAlignmentScore: shoulderScore,
-    spinalPostureScore: backScore,
-  };
-};
-
-const normalizeMinutes = (value) => {
-  const n = Number(value);
-  if (!Number.isFinite(n) || n <= 0) return 0;
-  // Legacy safety: some durations may have been stored in seconds.
-  if (n > 1000) return n / 60;
-  return n;
-};
+const {
+  clampScore,
+  toDateKey,
+  extractSessionScore,
+  averageScores,
+  hasRealSummaryData,
+  pickComponentScore,
+  computeCanonicalPostureScores,
+  normalizeMinutes,
+} = require("../utils/scoringUtils");
 
 // Send today's daily email to the authenticated user
 router.post("/send-daily-email", async (req, res) => {
@@ -1304,17 +1191,83 @@ router.post("/generate-ai-report", async (req, res) => {
     }
 
     const result = await generatePostureReport(userId);
+    const generatedAt = result.generatedAt || new Date().toISOString();
+    const expiresAt = new Date(Date.now() + 6 * 60 * 60 * 1000); // 6 hours from now
+
+    // Persist the report to the database (upsert: one active report per user)
+    try {
+      await GeneratedReport.findOneAndUpdate(
+        { userId },
+        {
+          userId,
+          report: result.report,
+          generatedAt: new Date(generatedAt),
+          expiresAt,
+        },
+        { upsert: true, new: true, setDefaultsOnInsert: true }
+      );
+      logger.info(`AI report saved to DB for user ${userId}, expires at ${expiresAt.toISOString()}`);
+    } catch (dbErr) {
+      // Non-fatal: still return the report even if DB save fails
+      logger.error("Failed to save AI report to DB:", dbErr.message);
+    }
 
     return res.json({
       success: true,
       report: result.report,
-      generatedAt: result.generatedAt || new Date().toISOString(),
+      generatedAt,
+      expiresAt: expiresAt.toISOString(),
     });
   } catch (err) {
     logger.error("AI report generation failed:", err);
     return res.status(500).json({
       success: false,
       message: "Failed to generate AI report: " + (err.message || "Unknown error"),
+    });
+  }
+});
+
+/**
+ * @route   GET /api/reports/saved-report
+ * @desc    Retrieve the most recent saved AI report (if not expired)
+ * @access  Private
+ */
+router.get("/saved-report", async (req, res) => {
+  try {
+    const userId = req.userId;
+
+    const savedReport = await GeneratedReport.findOne({ userId })
+      .sort({ generatedAt: -1 })
+      .lean();
+
+    if (!savedReport) {
+      return res.json({
+        success: true,
+        report: null,
+        message: "No saved report found. Generate one to get started.",
+      });
+    }
+
+    // Double-check expiry on the application side (TTL cleanup can lag)
+    if (new Date(savedReport.expiresAt) <= new Date()) {
+      return res.json({
+        success: true,
+        report: null,
+        message: "Your previous report has expired. Generate a new one.",
+      });
+    }
+
+    return res.json({
+      success: true,
+      report: savedReport.report,
+      generatedAt: savedReport.generatedAt,
+      expiresAt: savedReport.expiresAt,
+    });
+  } catch (err) {
+    logger.error("Failed to fetch saved report:", err);
+    return res.status(500).json({
+      success: false,
+      message: "Failed to fetch saved report.",
     });
   }
 });
